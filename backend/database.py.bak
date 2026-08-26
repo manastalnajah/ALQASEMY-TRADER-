@@ -1,0 +1,37 @@
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from dotenv import load_dotenv
+
+# 1. تحميل المتغيرات البيئية من ملف .env (الذي يحتوي على المفاتيح)
+load_dotenv()
+
+# 2. جلب رابط الاتصال بقاعدة بيانات Supabase (PostgreSQL)
+# تأكد من أن ملف .env يحتوي على المتغير: SUPABASE_DB_URL
+SQLALCHEMY_DATABASE_URL = os.getenv("SUPABASE_DB_URL")
+
+# التأكد من وجود الرابط لمنع انهيار السيرفر بشكل غير مفهوم
+if not SQLALCHEMY_DATABASE_URL:
+    raise ValueError("⚠️ خطأ: لم يتم العثور على رابط قاعدة البيانات (SUPABASE_DB_URL) في ملف .env")
+
+# 3. إعداد محرك الاتصال (Engine)
+# هذا المحرك هو المسؤول الفعلي عن التحدث مع قاعدة البيانات
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+
+# 4. إعداد مصنع الجلسات (SessionLocal)
+# كل مرة يحتاج فيها السيرفر لحفظ أو جلب بيانات، سيطلب جلسة من هنا
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# 5. القالب الأساسي (Base)
+# ترث منه جميع النماذج (Models) التي أنشأناها في مجلد domain
+Base = declarative_base()
+
+# 6. دالة حقن التبعية (Dependency)
+# هذه الدالة تستخدم في مسارات FastAPI لفتح الاتصال عند وصول الطلب، وإغلاقه فور الانتهاء
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

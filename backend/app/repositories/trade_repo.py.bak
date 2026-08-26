@@ -1,0 +1,34 @@
+from sqlalchemy.orm import Session
+# استدعاء النماذج والقوالب التي أنشأناها في مجلد domain
+from domain.models import TradeCommand
+from domain.schemas import CommandCreate
+
+# 1. دالة إضافة أمر تداول جديد (تستقبل الأمر من فلاتر وتحفظه في القاعدة)
+def create_trade_command(db: Session, command: CommandCreate):
+    db_command = TradeCommand(
+        symbol=command.symbol,
+        order_type=command.order_type,
+        lot_size=command.lot_size,
+        status="pending"  # يتم حفظه كأمر معلق افتراضياً
+    )
+    db.add(db_command)
+    db.commit()
+    db.refresh(db_command)
+    return db_command
+
+# 2. دالة جلب الأوامر المعلقة (سيستخدمها الميتاتريدر لمعرفة ما يجب تنفيذه)
+def get_pending_commands(db: Session):
+    return db.query(TradeCommand).filter(TradeCommand.status == "pending").all()
+
+# 3. دالة تحديث حالة الأمر (تغييره من pending إلى executed بعد التنفيذ)
+def update_command_status(db: Session, command_id: int, new_status: str):
+    # البحث عن الأمر برقم الـ ID
+    db_command = db.query(TradeCommand).filter(TradeCommand.id == command_id).first()
+    
+    # إذا وجد الأمر، يقوم بتحديث حالته
+    if db_command:
+        db_command.status = new_status
+        db.commit()
+        db.refresh(db_command)
+        
+    return db_command

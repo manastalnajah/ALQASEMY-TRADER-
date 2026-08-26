@@ -1,0 +1,39 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+# استدعاء ملف الاتصال بقاعدة البيانات (من الجذر)
+from database import get_db
+# استدعاء القوالب، مستودع العمليات، والخدمات (من داخل مجلد app)
+from app.domain import schemas
+from app.repositories import trade_repo
+from app.services import trade_service
+
+# إنشاء "الموجه" (Router) الذي سيحتوي على الروابط
+router = APIRouter(
+    prefix="/trades",
+    tags=["Trades"]
+)
+
+# 1. مسار إرسال أمر جديد (يستخدمه تطبيق فلاتر)
+@router.post("/commands", response_model=schemas.CommandResponse)
+def create_command(command: schemas.CommandCreate, db: Session = Depends(get_db)):
+    # ⚠️ التعديل هنا: تمرير البيانات لنقطة التفتيش (trade_service) للتأكد من صحة اللوت والبيانات أولاً
+    return trade_service.process_new_command(db=db, command=command)
+
+# 2. مسار جلب الأوامر المعلقة (يستخدمه الميتاتريدر)
+@router.get("/commands/pending", response_model=list[schemas.CommandResponse])
+def get_pending_commands(db: Session = Depends(get_db)):
+    # يبحث عن الأوامر التي لم تنفذ بعد ويرسلها للروبوت
+    return trade_repo.get_pending_commands(db=db)
+
+# 3. مسار تحديث حالة الأمر (يستخدمه الميتاتريدر بعد التنفيذ)
+@router.put("/commands/{command_id}/status", response_model=schemas.CommandResponse)
+def update_command_status(command_id: int, status: str, db: Session = Depends(get_db)):
+    # يقوم بتغيير حالة الأمر إلى مُنفذ أو فاشل
+    updated_command = trade_repo.update_command_status(db=db, command_id=command_id, new_status=status)
+    
+    # إذا كان رقم الأمر غير موجود في قاعدة البيانات، يعيد خطأ 404
+    if not updated_command:
+        raise HTTPException(status_code=404, detail="Command not found")
+        
+    return updated_command
