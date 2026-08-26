@@ -73,8 +73,13 @@ def health_check():
         "database": "connected"
     }
 
-# 10. التعديل الخاص بـ Pydroid 3 لتشغيل السيرفر
+# 10. إعدادات التشغيل للسيرفرات السحابية (Cloud & Production Ready)
 if __name__ == "__main__":
     import uvicorn
-    # تشغيل السيرفر على الشبكة المحلية للهاتف
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    import os
+    
+    # قراءة المنفذ المخصص من السحابة، أو استخدام 8000 افتراضياً إذا كان محلياً
+    port = int(os.environ.get("PORT", 8000))
+    
+    # التشغيل على 0.0.0.0 ليقبل الاتصالات الخارجية وليس الهاتف فقط
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
