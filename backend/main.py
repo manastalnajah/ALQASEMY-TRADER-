@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 1. استدعاء الموجهات (Routers) من المجلدات الداخلية
 from app.api.v1.trades_router import router as trades_router
 from app.api.v1.bot_router import router as bot_router  # 🆕 استدعاء موجه البوت الجديد
+from app.api.v1.mt5_router import router as mt5_router  # 🆕 استدعاء بوابة MT5 التي برمجناها للتو
 
 # 2. استدعاء محرك التداول (Worker) الذي يعمل في الخلفية
 from app.workers.trading_worker import start_background_worker
@@ -57,6 +58,7 @@ app.add_middleware(PerformanceMiddleware)
 # 7. دمج المسارات (Routers) في السيرفر
 app.include_router(trades_router)
 app.include_router(bot_router)  # 🆕 ربط موجه البوت المستقل
+app.include_router(mt5_router)  # 🆕 ربط موجه MT5 لاستقبال بيانات الروبوت
 
 # 8. المسار الرئيسي (لفحص حالة السيرفر من المتصفح)
 @app.get("/")
