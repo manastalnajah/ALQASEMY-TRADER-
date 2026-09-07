@@ -1,10 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 1. استدعاء الموجهات (Routers) من المجلدات الداخلية
 from app.api.v1.trades_router import router as trades_router
+from app.api.v1.bot_router import router as bot_router  # 🆕 استدعاء موجه البوت الجديد
 
 # 2. استدعاء محرك التداول (Worker) الذي يعمل في الخلفية
 from app.workers.trading_worker import start_background_worker
@@ -19,49 +20,8 @@ from app.api.middleware.performance import PerformanceMiddleware
 # هذا السطر يقوم بفحص قاعدة البيانات وإنشاء أي جداول مفقودة (مثل جدول commands)
 models.Base.metadata.create_all(bind=engine)
 
-# ==========================================
-# 🆕 تمت الإضافة: مسارات التحكم في البوت (Start, Stop, Status)
-# ==========================================
-bot_router = APIRouter(prefix="/api/v1/bot", tags=["Bot Control"])
-
-# متغير بسيط لحفظ حالة البوت
-bot_state = {
-    "is_running": False,
-    "status": "stopped"
-}
-
-@bot_router.post("/start")
-async def start_bot():
-    bot_state["is_running"] = True
-    bot_state["status"] = "running"
-    # يمكنك لاحقاً ربط هذا برمز التشغيل الفعلي للمحرك
-    return {
-        "status": "success", 
-        "message": "تم تشغيل روبوت القاسمي بنجاح", 
-        "is_running": True
-    }
-
-@bot_router.post("/stop")
-async def stop_bot():
-    bot_state["is_running"] = False
-    bot_state["status"] = "stopped"
-    return {
-        "status": "success", 
-        "message": "تم إيقاف الروبوت", 
-        "is_running": False
-    }
-
-@bot_router.get("/status")
-async def get_bot_status():
-    return {
-        "status": "success", 
-        "is_running": bot_state["is_running"],
-        "current_state": bot_state["status"]
-    }
-# ==========================================
-
 # 4. إعداد دورة حياة التطبيق (Lifespan)
-# هذه الدالة السحرية تقوم بتشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
+# هذه الدالة السحرية تقوم تشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- ما يكتب هنا يعمل عند تشغيل السيرفر ---
@@ -96,7 +56,7 @@ app.add_middleware(PerformanceMiddleware)
 
 # 7. دمج المسارات (Routers) في السيرفر
 app.include_router(trades_router)
-app.include_router(bot_router) # 🆕 تم ربط مسار التحكم بالبوت هنا!
+app.include_router(bot_router)  # 🆕 ربط موجه البوت المستقل
 
 # 8. المسار الرئيسي (لفحص حالة السيرفر من المتصفح)
 @app.get("/")
