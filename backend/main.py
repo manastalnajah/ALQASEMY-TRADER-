@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 
 # 1. استدعاء الموجهات (Routers) من المجلدات الداخلية
@@ -13,11 +13,52 @@ from app.workers.trading_worker import start_background_worker
 from database import engine
 from app.domain import models
 
-# ⚠️ التعديل هنا: استدعاء بوابة مراقبة الأداء (Middleware)
+# التعديل هنا: استدعاء بوابة مراقبة الأداء (Middleware)
 from app.api.middleware.performance import PerformanceMiddleware
 
 # هذا السطر يقوم بفحص قاعدة البيانات وإنشاء أي جداول مفقودة (مثل جدول commands)
 models.Base.metadata.create_all(bind=engine)
+
+# ==========================================
+# 🆕 تمت الإضافة: مسارات التحكم في البوت (Start, Stop, Status)
+# ==========================================
+bot_router = APIRouter(prefix="/api/v1/bot", tags=["Bot Control"])
+
+# متغير بسيط لحفظ حالة البوت
+bot_state = {
+    "is_running": False,
+    "status": "stopped"
+}
+
+@bot_router.post("/start")
+async def start_bot():
+    bot_state["is_running"] = True
+    bot_state["status"] = "running"
+    # يمكنك لاحقاً ربط هذا برمز التشغيل الفعلي للمحرك
+    return {
+        "status": "success", 
+        "message": "تم تشغيل روبوت القاسمي بنجاح", 
+        "is_running": True
+    }
+
+@bot_router.post("/stop")
+async def stop_bot():
+    bot_state["is_running"] = False
+    bot_state["status"] = "stopped"
+    return {
+        "status": "success", 
+        "message": "تم إيقاف الروبوت", 
+        "is_running": False
+    }
+
+@bot_router.get("/status")
+async def get_bot_status():
+    return {
+        "status": "success", 
+        "is_running": bot_state["is_running"],
+        "current_state": bot_state["status"]
+    }
+# ==========================================
 
 # 4. إعداد دورة حياة التطبيق (Lifespan)
 # هذه الدالة السحرية تقوم بتشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
@@ -50,12 +91,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ⚠️ التعديل هنا: تفعيل بوابة مراقبة الأداء (يجب أن تضاف هنا بعد تهيئة التطبيق)
+# التعديل هنا: تفعيل بوابة مراقبة الأداء (يجب أن تضاف هنا بعد تهيئة التطبيق)
 app.add_middleware(PerformanceMiddleware)
 
 # 7. دمج المسارات (Routers) في السيرفر
-# تم ربط مسار التداول الذي سيستقبل الأوامر من هاتفك أو يرسلها للميتاتريدر
 app.include_router(trades_router)
+app.include_router(bot_router) # 🆕 تم ربط مسار التحكم بالبوت هنا!
 
 # 8. المسار الرئيسي (لفحص حالة السيرفر من المتصفح)
 @app.get("/")
