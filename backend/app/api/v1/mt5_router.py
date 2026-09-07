@@ -52,7 +52,29 @@ async def sync_candles(request: Request):
 @router.post("/specs/sync")
 async def sync_specs(request: Request):
     return {"status": "success", "message": "Symbol specifications synced"}
-
+# ==========================================
+# 4. مسار مزامنة الحساب (Account Sync) - الذي يبحث عنه الروبوت
+# ==========================================
+@router.post("/account/sync")
+async def sync_account(request: Request):
+    try:
+        # استقبال بيانات الرصيد والحساب من الروبوت
+        data = await request.json()
+        
+        # طباعة البيانات في الكونسول للتأكد من وصولها (لأغراض الفحص)
+        print("📥 Account Data Received:", data)
+        
+        # لاحقاً: هنا سيتم كتابة كود التحديث في قاعدة بيانات Supabase
+        
+        return {
+            "status": "success", 
+            "message": "Account data synced successfully"
+        }
+    except Exception as e:
+        return {
+            "status": "error", 
+            "message": str(e)
+        }
 # ==========================================
 # 3. مسار نبض الاتصال (Heartbeat) وتحديث الرصيد المباشر
 # ==========================================
