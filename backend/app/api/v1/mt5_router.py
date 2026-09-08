@@ -37,6 +37,9 @@ async def receive_mt5_updates(request: Request):
 async def sync_candles(request: Request):
     try:
         data = await request.json()
+        # 🆕 السطر الجديد لطباعة بيانات السوق والشموع القادمة من الروبوت
+        print("📥 Market/Candles Data Received:", data) 
+        
         return {"status": "success", "message": "Candles synced successfully"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -69,7 +72,7 @@ async def sync_account(request: Request):
             margin_level = (equity / margin) * 100
 
         if account_number:
-            # 🆕 تحديث قاعدة البيانات باستخدام engine.begin() ليتم الحفظ (Commit) تلقائياً
+            # تحديث قاعدة البيانات باستخدام engine.begin() ليتم الحفظ (Commit) تلقائياً
             with engine.begin() as conn:
                 query = text("""
                     UPDATE trading_accounts 
