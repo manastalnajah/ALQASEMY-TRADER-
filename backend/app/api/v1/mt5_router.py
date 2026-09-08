@@ -31,7 +31,7 @@ async def receive_mt5_updates(request: Request):
         return {"status": "error", "message": str(e)}
 
 # ==========================================
-# 2. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - مع الحفظ في قاعدة البيانات
+# 2. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - مع الحفظ المزدوج
 # ==========================================
 @router.post("/candles/sync")
 async def sync_candles(request: Request):
@@ -42,16 +42,15 @@ async def sync_candles(request: Request):
         if not candles:
             return {"status": "success", "message": "No candles found in payload"}
 
-        # 1. تجميع آخر شمعة (السعر الحالي) لكل زوج عملات
+        # تجميع آخر شمعة لكل زوج عملات لاستخدامها كأسعار حية
         latest_candles = {}
         for c in candles:
             symbol = c.get("symbol")
             if symbol:
-                # الكود سيستمر بتحديث الزوج حتى يصل لآخر شمعة (وهي الأحدث زمنياً)
                 latest_candles[symbol] = c
 
-        # 2. حفظ البيانات في جدول market_data عبر SQLAlchemy
         with engine.begin() as conn:
+            # 1. حفظ أسعار السوق الحية في جدول market_data
             for symbol, c in latest_candles.items():
                 open_price = c.get("open", 0.0)
                 close_price = c.get("close", 0.0)
@@ -59,15 +58,11 @@ async def sync_candles(request: Request):
                 low_price = c.get("low", 0.0)
                 volume = c.get("volume", 0)
 
-                # حساب التغير اليومي ونسبة التغير
                 change = close_price - open_price
                 change_percent = (change / open_price * 100) if open_price > 0 else 0.0
-
-                # بما أن المنصة ترسل الشموع، سنعتبر سعر الإغلاق هو السعر الحالي (Bid/Ask)
                 bid = close_price
-                ask = close_price # يمكن إضافة فرق السبريد لاحقاً إذا أرسله الروبوت
+                ask = close_price 
 
-                # محاولة تحديث الزوج إذا كان موجوداً مسبقاً
                 update_query = text("""
                     UPDATE market_data 
                     SET bid = :bid, ask = :ask, high = :high, low = :low, 
@@ -81,7 +76,6 @@ async def sync_candles(request: Request):
                     "last_updated": datetime.utcnow().isoformat(), "symbol": symbol
                 })
 
-                # إذا لم يكن الزوج موجوداً في الجدول (rowcount == 0)، نقوم بإضافته لأول مرة
                 if result.rowcount == 0:
                     insert_query = text("""
                         INSERT INTO market_data 
@@ -94,9 +88,34 @@ async def sync_candles(request: Request):
                         "volume": volume, "change": change, "change_percent": change_percent,
                         "last_updated": datetime.utcnow().isoformat()
                     })
+            
+            # 2. حفظ تاريخ الشموع بالكامل في جدول candles من أجل الرسم البياني في فلاتر
+            for c in candles:
+                symbol = c.get("symbol")
+                timeframe = c.get("timeframe")
+                open_time = c.get("open_time")
+                
+                if not symbol or not timeframe or not open_time:
+                    continue
                     
-        print(f"✅ Market Data Updated for {len(latest_candles)} symbols")
-        return {"status": "success", "message": "Market data synced successfully"}
+                candle_query = text("""
+                    INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume)
+                    VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v)
+                    ON CONFLICT (symbol_name, timeframe, open_time) 
+                    DO UPDATE SET 
+                        open = EXCLUDED.open, 
+                        high = EXCLUDED.high, 
+                        low = EXCLUDED.low, 
+                        close = EXCLUDED.close, 
+                        volume = EXCLUDED.volume
+                """)
+                conn.execute(candle_query, {
+                    "sym": symbol, "tf": timeframe, "ot": open_time,
+                    "o": c.get("open"), "h": c.get("high"), "l": c.get("low"), "c": c.get("close"), "v": c.get("volume")
+                })
+
+        print(f"✅ Market Data & Candles Synced for {len(latest_candles)} symbols")
+        return {"status": "success", "message": "Market data and candles synced successfully"}
     except Exception as e:
         print("❌ Error in candles sync:", str(e))
         return {"status": "error", "message": str(e)}
@@ -104,68 +123,6 @@ async def sync_candles(request: Request):
 @router.post("/specs/sync")
 async def sync_specs(request: Request):
     return {"status": "success", "message": "Symbol specifications synced"}
-
-# ==========================================
-# 4. مسار مزامنة الحساب (Account Sync) - باستخدام SQLAlchemy المباشر
-# ==========================================
-@router.post("/account/sync")
-async def sync_account(request: Request):
-    try:
-        data = await request.json()
-        print("📥 Account Sync Data Received:", data)
-
-        account_data = data.get("account", {})
-        
-        # استخراج البيانات بناءً على مفاتيح الروبوت الصحيحة
-        account_number = account_data.get("login")
-        balance = account_data.get("balance", 0.0)
-        equity = account_data.get("equity", 0.0)
-        margin = account_data.get("margin", 0.0)
-        free_margin = account_data.get("free_margin", 0.0)
-        profit = account_data.get("profit", equity - balance)
-        
-        margin_level = 0.0
-        if margin > 0:
-            margin_level = (equity / margin) * 100
-
-        if account_number:
-            # تحديث قاعدة البيانات باستخدام engine.begin() ليتم الحفظ (Commit) تلقائياً
-            with engine.begin() as conn:
-                query = text("""
-                    UPDATE trading_accounts 
-                    SET balance = :balance, 
-                        equity = :equity, 
-                        margin = :margin, 
-                        free_margin = :free_margin, 
-                        profit = :profit, 
-                        margin_level = :margin_level, 
-                        is_connected = True, 
-                        last_sync = :last_sync
-                    WHERE account_number = :account_number
-                """)
-                conn.execute(query, {
-                    "balance": balance,
-                    "equity": equity,
-                    "margin": margin,
-                    "free_margin": free_margin,
-                    "profit": profit,
-                    "margin_level": margin_level,
-                    "last_sync": datetime.utcnow().isoformat(),
-                    "account_number": account_number
-                })
-                
-            print(f"✅ Database Updated via SQLAlchemy for account: {account_number} | Balance: {balance}")
-
-        return {
-            "status": "success", 
-            "message": "Account data synced and updated in database successfully"
-        }
-    except Exception as e:
-        print("❌ Error in account sync:", str(e))
-        return {
-            "status": "error", 
-            "message": str(e)
-        }
 
 # ==========================================
 # 3. مسار نبض الاتصال (Heartbeat) وتحديث الرصيد المباشر
@@ -212,5 +169,65 @@ async def account_heartbeat(account_data: AccountHeartbeat):
     except Exception as e:
         return {
             "status": "error",
+            "message": str(e)
+        }
+
+# ==========================================
+# 4. مسار مزامنة الحساب (Account Sync)
+# ==========================================
+@router.post("/account/sync")
+async def sync_account(request: Request):
+    try:
+        data = await request.json()
+        print("📥 Account Sync Data Received:", data)
+
+        account_data = data.get("account", {})
+        
+        account_number = account_data.get("login")
+        balance = account_data.get("balance", 0.0)
+        equity = account_data.get("equity", 0.0)
+        margin = account_data.get("margin", 0.0)
+        free_margin = account_data.get("free_margin", 0.0)
+        profit = account_data.get("profit", equity - balance)
+        
+        margin_level = 0.0
+        if margin > 0:
+            margin_level = (equity / margin) * 100
+
+        if account_number:
+            with engine.begin() as conn:
+                query = text("""
+                    UPDATE trading_accounts 
+                    SET balance = :balance, 
+                        equity = :equity, 
+                        margin = :margin, 
+                        free_margin = :free_margin, 
+                        profit = :profit, 
+                        margin_level = :margin_level, 
+                        is_connected = True, 
+                        last_sync = :last_sync
+                    WHERE account_number = :account_number
+                """)
+                conn.execute(query, {
+                    "balance": balance,
+                    "equity": equity,
+                    "margin": margin,
+                    "free_margin": free_margin,
+                    "profit": profit,
+                    "margin_level": margin_level,
+                    "last_sync": datetime.utcnow().isoformat(),
+                    "account_number": account_number
+                })
+                
+            print(f"✅ Database Updated via SQLAlchemy for account: {account_number} | Balance: {balance}")
+
+        return {
+            "status": "success", 
+            "message": "Account data synced and updated in database successfully"
+        }
+    except Exception as e:
+        print("❌ Error in account sync:", str(e))
+        return {
+            "status": "error", 
             "message": str(e)
         }
