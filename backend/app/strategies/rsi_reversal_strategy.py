@@ -14,12 +14,15 @@ class RSIReversalStrategy(BaseStrategy):
             system_logger.warning("⚠️ بيانات مؤشر RSI مفقودة، القرار: HOLD")
             return "HOLD"
 
-        # الخوارزمية: استغلال التشبع (Overbought / Oversold)
-        if rsi_value >= 70:
-            system_logger.info(f"📉 تشبع شرائي (RSI={rsi_value})! توقع هبوط -> SELL")
+        # 🛠️ [وضع الاختبار]: تم تقليل الشروط جداً لإجبار البوت على فتح صفقات فورية
+        # إذا كان المؤشر 50 أو أكثر، سيفتح صفقة بيع مباشرة
+        if rsi_value >= 50:
+            system_logger.info(f"📉 (وضع الاختبار) إشارة سريعة (RSI={rsi_value})! توقع هبوط -> SELL")
             return "SELL"
-        elif rsi_value <= 30:
-            system_logger.info(f"📈 تشبع بيعي (RSI={rsi_value})! توقع صعود -> BUY")
+            
+        # إذا كان المؤشر أقل من 50، سيفتح صفقة شراء مباشرة
+        elif rsi_value < 50:
+            system_logger.info(f"📈 (وضع الاختبار) إشارة سريعة (RSI={rsi_value})! توقع صعود -> BUY")
             return "BUY"
             
         return "HOLD"
