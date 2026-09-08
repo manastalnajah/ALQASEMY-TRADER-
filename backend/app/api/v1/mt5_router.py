@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from datetime import datetime
 
-# 🆕 استدعاء الاتصال المباشر بقاعدة البيانات (الموجود لديك بنجاح في ملف database)
+# استدعاء الاتصال المباشر بقاعدة البيانات
 from database import engine
 from sqlalchemy import text
 
@@ -12,14 +12,63 @@ router = APIRouter(
 )
 
 # ==========================================
-# 1. مسار الأوامر (Commands)
+# 1. مسار الأوامر (Commands) - النسخة الحقيقية للتنفيذ
 # ==========================================
 @router.get("/commands")
 async def get_pending_commands(ea_id: str = None, limit: int = 10):
-    return {
-        "status": "success",
-        "commands": []
-    }
+    try:
+        with engine.begin() as conn:
+            # سحب الأوامر المعلقة (pending) من قاعدة البيانات ليرسلها للروبوت
+            query = text("""
+                SELECT id, symbol, order_type, lot_size, stop_loss, take_profit 
+                FROM trade_commands 
+                WHERE status = 'pending' 
+                ORDER BY created_at ASC
+                LIMIT :limit
+            """)
+            result = conn.execute(query, {"limit": limit})
+            
+            commands_list = []
+            for row in result:
+                commands_list.append({
+                    "command_id": str(row.id),
+                    "symbol": row.symbol,
+                    "side": str(row.order_type).upper(),
+                    "volume": float(row.lot_size),
+                    "sl": float(row.stop_loss) if row.stop_loss else 0.0,
+                    "tp": float(row.take_profit) if row.take_profit else 0.0
+                })
+                
+            return commands_list
+    except Exception as e:
+        print("❌ Error fetching commands:", e)
+        return []
+
+@router.post("/commands/{command_id}/ack")
+async def ack_command(command_id: str, ea_id: str = None):
+    try:
+        with engine.begin() as conn:
+            # بمجرد أن يستلم الروبوت الأمر، نغير حالته لـ processing حتى لا ينفذه مرتين
+            conn.execute(text("UPDATE trade_commands SET status = 'processing' WHERE id = :id"), {"id": command_id})
+        return {"status": "success"}
+    except Exception as e:
+        print(f"❌ Error ack command {command_id}:", e)
+        return {"status": "error", "message": str(e)}
+
+@router.post("/commands/{command_id}/report")
+async def report_command(command_id: str, request: Request):
+    try:
+        data = await request.json()
+        status_val = data.get("status", "EXECUTED").lower()
+        with engine.begin() as conn:
+            # تحديث حالة الأمر النهائية (تم التنفيذ بنجاح أو فشل)
+            conn.execute(text("UPDATE trade_commands SET status = :status WHERE id = :id"), 
+                         {"status": status_val, "id": command_id})
+        print(f"✅ Command {command_id} reported as {status_val.upper()}")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"❌ Error reporting command {command_id}:", e)
+        return {"status": "error", "message": str(e)}
 
 @router.post("/commands")
 async def receive_mt5_updates(request: Request):
@@ -29,6 +78,7 @@ async def receive_mt5_updates(request: Request):
         return {"status": "success", "message": "Data received successfully"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 # ==========================================
 # 2. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - مع الحفظ المزدوج
@@ -42,7 +92,6 @@ async def sync_candles(request: Request):
         if not candles:
             return {"status": "success", "message": "No candles found in payload"}
 
-        # تجميع آخر شمعة لكل زوج عملات لاستخدامها كأسعار حية
         latest_candles = {}
         for c in candles:
             symbol = c.get("symbol")
