@@ -2,8 +2,9 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from datetime import datetime
 
-# استدعاء عميل Supabase للاتصال بقاعدة البيانات وتحديث الجداول
-from app.core.network.supabase_client import SupabaseClient  # تأكد أن مسار الاستدعاء يطابق هيكل مشروعك
+# 🆕 استدعاء الاتصال المباشر بقاعدة البيانات (الموجود لديك بنجاح في ملف database)
+from database import engine
+from sqlalchemy import text
 
 router = APIRouter(
     prefix="/api/v1/mt5",
@@ -17,7 +18,7 @@ router = APIRouter(
 async def get_pending_commands(ea_id: str = None, limit: int = 10):
     return {
         "status": "success",
-        "commands": []  # قائمة فارغة تخبر الروبوت أنه لا توجد أوامر معلقة حالياً
+        "commands": []
     }
 
 @router.post("/commands")
@@ -45,7 +46,7 @@ async def sync_specs(request: Request):
     return {"status": "success", "message": "Symbol specifications synced"}
 
 # ==========================================
-# 4. مسار مزامنة الحساب (Account Sync) - النسخة النهائية المحدثة 🚀
+# 4. مسار مزامنة الحساب (Account Sync) - باستخدام SQLAlchemy المباشر
 # ==========================================
 @router.post("/account/sync")
 async def sync_account(request: Request):
@@ -53,44 +54,47 @@ async def sync_account(request: Request):
         data = await request.json()
         print("📥 Account Sync Data Received:", data)
 
-        # 1. الدخول إلى الكائن الفرعي "account" الذي يرسله الروبوت كما ظهر في السجلات
         account_data = data.get("account", {})
-
-        # 2. استخراج البيانات بالأسماء الصحيحة (استخدام login بدلاً من account_number)
+        
+        # استخراج البيانات بناءً على مفاتيح الروبوت الصحيحة
         account_number = account_data.get("login")
         balance = account_data.get("balance", 0.0)
         equity = account_data.get("equity", 0.0)
         margin = account_data.get("margin", 0.0)
         free_margin = account_data.get("free_margin", 0.0)
-        
-        # حساب الربح أو الخسارة
         profit = account_data.get("profit", equity - balance)
         
-        # حساب مستوى الهامش
         margin_level = 0.0
         if margin > 0:
             margin_level = (equity / margin) * 100
 
-        # 3. التأكد من وجود رقم الحساب قبل التحديث
         if account_number:
-            update_data = {
-                "balance": balance,
-                "equity": equity,
-                "margin": margin,
-                "free_margin": free_margin,
-                "profit": profit,
-                "margin_level": margin_level,
-                "is_connected": True,
-                "last_sync": datetime.utcnow().isoformat()
-            }
-
-            # تنفيذ أمر التحديث في قاعدة البيانات
-            SupabaseClient.table("trading_accounts") \
-                .update(update_data) \
-                .eq("account_number", account_number) \
-                .execute()
+            # 🆕 تحديث قاعدة البيانات باستخدام engine.begin() ليتم الحفظ (Commit) تلقائياً
+            with engine.begin() as conn:
+                query = text("""
+                    UPDATE trading_accounts 
+                    SET balance = :balance, 
+                        equity = :equity, 
+                        margin = :margin, 
+                        free_margin = :free_margin, 
+                        profit = :profit, 
+                        margin_level = :margin_level, 
+                        is_connected = True, 
+                        last_sync = :last_sync
+                    WHERE account_number = :account_number
+                """)
+                conn.execute(query, {
+                    "balance": balance,
+                    "equity": equity,
+                    "margin": margin,
+                    "free_margin": free_margin,
+                    "profit": profit,
+                    "margin_level": margin_level,
+                    "last_sync": datetime.utcnow().isoformat(),
+                    "account_number": account_number
+                })
                 
-            print(f"✅ Database Updated for account: {account_number} | Balance: {balance}")
+            print(f"✅ Database Updated via SQLAlchemy for account: {account_number} | Balance: {balance}")
 
         return {
             "status": "success", 
@@ -118,20 +122,28 @@ class AccountHeartbeat(BaseModel):
 @router.post("/heartbeat")
 async def account_heartbeat(account_data: AccountHeartbeat):
     try:
-        update_data = {
-            "balance": account_data.balance,
-            "equity": account_data.equity,
-            "margin": account_data.margin,
-            "free_margin": account_data.free_margin,
-            "profit": account_data.profit,
-            "is_connected": account_data.is_connected,
-            "last_heartbeat": datetime.utcnow().isoformat()
-        }
-
-        SupabaseClient.table("trading_accounts") \
-            .update(update_data) \
-            .eq("account_number", account_data.account_number) \
-            .execute()
+        with engine.begin() as conn:
+            query = text("""
+                UPDATE trading_accounts 
+                SET balance = :balance, 
+                    equity = :equity, 
+                    margin = :margin, 
+                    free_margin = :free_margin, 
+                    profit = :profit, 
+                    is_connected = :is_connected, 
+                    last_heartbeat = :last_heartbeat
+                WHERE account_number = :account_number
+            """)
+            conn.execute(query, {
+                "balance": account_data.balance,
+                "equity": account_data.equity,
+                "margin": account_data.margin,
+                "free_margin": account_data.free_margin,
+                "profit": account_data.profit,
+                "is_connected": account_data.is_connected,
+                "last_heartbeat": datetime.utcnow().isoformat(),
+                "account_number": account_data.account_number
+            })
 
         return {
             "status": "success",
