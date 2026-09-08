@@ -45,7 +45,7 @@ async def sync_specs(request: Request):
     return {"status": "success", "message": "Symbol specifications synced"}
 
 # ==========================================
-# 4. مسار مزامنة الحساب (Account Sync) - مع التحديث الفعلي في Supabase
+# 4. مسار مزامنة الحساب (Account Sync) - النسخة النهائية المحدثة 🚀
 # ==========================================
 @router.post("/account/sync")
 async def sync_account(request: Request):
@@ -53,17 +53,26 @@ async def sync_account(request: Request):
         data = await request.json()
         print("📥 Account Sync Data Received:", data)
 
-        # استخراج بيانات الحساب المرسلة من الروبوت
-        account_number = data.get("account_number") or data.get("accountNumber")
-        balance = data.get("balance", 0.0)
-        equity = data.get("equity", 0.0)
-        margin = data.get("margin", 0.0)
-        free_margin = data.get("free_margin", 0.0) or data.get("freeMargin", 0.0)
-        profit = data.get("profit", 0.0)
-        margin_level = data.get("margin_level", 0.0) or data.get("marginLevel", 0.0)
+        # 1. الدخول إلى الكائن الفرعي "account" الذي يرسله الروبوت كما ظهر في السجلات
+        account_data = data.get("account", {})
 
+        # 2. استخراج البيانات بالأسماء الصحيحة (استخدام login بدلاً من account_number)
+        account_number = account_data.get("login")
+        balance = account_data.get("balance", 0.0)
+        equity = account_data.get("equity", 0.0)
+        margin = account_data.get("margin", 0.0)
+        free_margin = account_data.get("free_margin", 0.0)
+        
+        # حساب الربح أو الخسارة
+        profit = account_data.get("profit", equity - balance)
+        
+        # حساب مستوى الهامش
+        margin_level = 0.0
+        if margin > 0:
+            margin_level = (equity / margin) * 100
+
+        # 3. التأكد من وجود رقم الحساب قبل التحديث
         if account_number:
-            # تحديث جدول trading_accounts في Supabase بناءً على رقم الحساب
             update_data = {
                 "balance": balance,
                 "equity": equity,
@@ -80,6 +89,8 @@ async def sync_account(request: Request):
                 .update(update_data) \
                 .eq("account_number", account_number) \
                 .execute()
+                
+            print(f"✅ Database Updated for account: {account_number} | Balance: {balance}")
 
         return {
             "status": "success", 
@@ -107,7 +118,6 @@ class AccountHeartbeat(BaseModel):
 @router.post("/heartbeat")
 async def account_heartbeat(account_data: AccountHeartbeat):
     try:
-        # تحديث بيانات النبض وحالة الاتصال في Supabase
         update_data = {
             "balance": account_data.balance,
             "equity": account_data.equity,
