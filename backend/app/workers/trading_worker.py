@@ -10,10 +10,10 @@ from sqlalchemy import text
 async def run_trading_cycle():
     db = SessionLocal()
     try:
-        # 1. جلب شمعات الدقيقة (M1) لسرعة استجابة فائقة
+        # 🔴 التعديل هنا: أعدناها إلى M5 لأن الروبوت يرسل M5 وليس M1
         query = text("""
             SELECT close FROM candles 
-            WHERE symbol_name = 'EURUSD' AND timeframe = 'M1'
+            WHERE symbol_name = 'EURUSD' AND timeframe = 'M5'
             ORDER BY open_time DESC 
             LIMIT 50
         """)
@@ -57,7 +57,6 @@ async def run_trading_cycle():
             system_logger.info("✅ تم وضع أمر الشراء التجريبي بنجاح! راقب الميتاتريدر الآن.")
         # =========================================================
 
-        # الدالة الأصلية الخاصة بك
         evaluate_and_execute_strategy(
             db=db, 
             strategy_name="rsi", 
@@ -70,8 +69,7 @@ async def run_trading_cycle():
         db.close() 
 
 async def start_background_worker():
-    system_logger.info("🚀 تشغيل محرك التداول الآلي في الخلفية (إطار الدقيقة M1)...")
+    system_logger.info("🚀 تشغيل محرك التداول الآلي في الخلفية (إطار M5)...")
     while True:
         await run_trading_cycle()
-        # 2. تم تخفيض زمن الانتظار إلى ثانيتين للاستجابة اللحظية لأسعار السوق
         await asyncio.sleep(2)
