@@ -5,8 +5,8 @@ from pydantic import BaseModel
 from typing import List
 from sqlalchemy import text
 
-# الاستيراد الصحيح بناءً على هيكلة مشروعنا
-from app.database import get_db_connection 
+# الاستيراد الصحيح المطابق لملفات مشروعك
+from database import SessionLocal 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ async def sync_candles(request: CandlesSyncRequest):
         
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
 
-    # 1. تجهيز البيانات كقائمة قواميس (Dictionaries) لتتوافق مع SQLAlchemy Bulk Insert
+    # 1. تجهيز البيانات كقائمة قواميس
     values = []
     for c in request.candles:
         values.append({
@@ -63,16 +63,13 @@ async def sync_candles(request: CandlesSyncRequest):
             volume = EXCLUDED.volume;
     """)
 
-    # 3. فتح الاتصال بقاعدة البيانات وتنفيذ الاستعلام
-    conn = get_db_connection()
-    if not conn:
-        logger.error("❌ Failed to connect to database for candles sync")
-        raise HTTPException(status_code=500, detail="Database connection failed")
-
+    # 3. فتح جلسة الاتصال باستخدام SessionLocal
+    db = SessionLocal()
+    
     try:
         # تنفيذ الاستعلام دفعة واحدة (Bulk Execution)
-        conn.execute(insert_query, values)
-        conn.commit()
+        db.execute(insert_query, values)
+        db.commit()
         
         elapsed = time.time() - start_time
         logger.info(f"✅ Successfully inserted/updated {len(request.candles)} candles in {elapsed:.4f} seconds")
@@ -84,7 +81,7 @@ async def sync_candles(request: CandlesSyncRequest):
         }
 
     except Exception as e:
-        conn.rollback()
+        db.rollback()
         
         # التقاط الخطأ الحقيقي وطباعته بوضوح
         error_msg = str(e)
@@ -95,8 +92,6 @@ async def sync_candles(request: CandlesSyncRequest):
         raise HTTPException(status_code=500, detail=f"Failed to sync candles: {error_msg}")
         
     finally:
-        conn.close()
+        db.close()
 
-# ==========================================
 # يمكنك إبقاء بقية مساراتك هنا (مثل الأوامر وغيرها)
-# ==========================================
