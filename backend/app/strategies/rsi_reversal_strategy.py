@@ -10,19 +10,20 @@ class RSIReversalStrategy(BaseStrategy):
         
         rsi_value = market_data.get("rsi")
 
-        if not rsi_value:
+        if rsi_value is None:
             system_logger.warning("⚠️ بيانات مؤشر RSI مفقودة، القرار: HOLD")
             return "HOLD"
 
-        # 🛠️ [وضع الاختبار]: تم تقليل الشروط جداً لإجبار البوت على فتح صفقات فورية
-        # إذا كان المؤشر 50 أو أكثر، سيفتح صفقة بيع مباشرة
-        if rsi_value >= 50:
-            system_logger.info(f"📉 (وضع الاختبار) إشارة سريعة (RSI={rsi_value})! توقع هبوط -> SELL")
-            return "SELL"
-            
-        # إذا كان المؤشر أقل من 50، سيفتح صفقة شراء مباشرة
-        elif rsi_value < 50:
-            system_logger.info(f"📈 (وضع الاختبار) إشارة سريعة (RSI={rsi_value})! توقع صعود -> BUY")
+        # 🎯 الاستراتيجية الاحترافية الحقيقية (Mean Reversion) بدون أي اختبارات وهمية
+        # الشراء فقط عند التشبع البيعي الحقيقي
+        if rsi_value < 30:
+            system_logger.info(f"📈 [إشارة حقيقية] تشبع بيعي (RSI={rsi_value:.2f})! توقع صعود -> BUY")
             return "BUY"
             
+        # البيع فقط عند التشبع الشرائي الحقيقي
+        elif rsi_value > 70:
+            system_logger.info(f"📉 [إشارة حقيقية] تشبع شرائي (RSI={rsi_value:.2f})! توقع هبوط -> SELL")
+            return "SELL"
+            
+        # أي قيمة بين 30 و 70 تعني الحياد التام والانتظار بصمت
         return "HOLD"
