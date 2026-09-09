@@ -5,8 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # 1. استدعاء الموجهات (Routers) من المجلدات الداخلية
 from app.api.v1.trades_router import router as trades_router
-from app.api.v1.bot_router import router as bot_router  # 🆕 استدعاء موجه البوت الجديد
-from app.api.v1.mt5_router import router as mt5_router  # 🆕 استدعاء بوابة MT5 التي برمجناها للتو
+from app.api.v1.bot_router import router as bot_router  # 🆕 موجه البوت المستقل
+from app.api.v1.mt5_router import router as mt5_router  # 🆕 بوابة MT5 المعدلة
 
 # 2. استدعاء محرك التداول (Worker) الذي يعمل في الخلفية
 from app.workers.trading_worker import start_background_worker
@@ -15,52 +15,47 @@ from app.workers.trading_worker import start_background_worker
 from database import engine
 from app.domain import models
 
-# التعديل هنا: استدعاء بوابة مراقبة الأداء (Middleware)
+# استدعاء بوابة مراقبة الأداء (Middleware)
 from app.api.middleware.performance import PerformanceMiddleware
 
-# هذا السطر يقوم بفحص قاعدة البيانات وإنشاء أي جداول مفقودة (مثل جدول commands)
+# فحص قاعدة البيانات وإنشاء أي جداول مفقودة
 models.Base.metadata.create_all(bind=engine)
 
-# 4. إعداد دورة حياة التطبيق (Lifespan)
-# هذه الدالة السحرية تقوم تشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
+# 4. إعداد دورة حياة التطبيق (Lifespan) لتشغيل الروبوت في الخلفية بأمان
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- ما يكتب هنا يعمل عند تشغيل السيرفر ---
-    # إنشاء مهمة (Task) مستقلة للمحرك لكي لا يوقف عمل الروابط (APIs)
+    # تشغيل محرك التداول بشكل مستقل في الخلفية
     worker_task = asyncio.create_task(start_background_worker())
-    
-    yield # هنا السيرفر يعمل ويستقبل الطلبات
-    
-    # --- ما يكتب هنا يعمل عند إغلاق السيرفر ---
-    # إيقاف المحرك بأمان
+    yield
+    # إيقاف المحرك بأمان عند إغلاق التطبيق
     worker_task.cancel()
 
-# 5. تهيئة التطبيق الأساسي للسيرفر وربطه بدورة الحياة (Lifespan)
+# 5. تهيئة التطبيق الأساسي للسيرفر
 app = FastAPI(
     title="Alqasemy Trader API",
     description="Backend server for automated trading system",
-    version="1.0.0",
-    lifespan=lifespan  # تم الربط هنا!
+    version="8.0.0",
+    lifespan=lifespan
 )
 
-# 6. إعدادات CORS للسماح لتطبيق فلاتر بالاتصال بالسيرفر دون مشاكل أمنية
+# 6. إعدادات CORS للسماح بالاتصال من أي تطبيق خارجي (مثل Flutter)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # يسمح باستقبال الطلبات من أي مكان
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# التعديل هنا: تفعيل بوابة مراقبة الأداء (يجب أن تضاف هنا بعد تهيئة التطبيق)
+# تفعيل بوابة مراقبة الأداء
 app.add_middleware(PerformanceMiddleware)
 
-# 7. دمج المسارات (Routers) في السيرفر
+# 7. دمج المسارات (Routers) في السيرفر الرئيسي
 app.include_router(trades_router)
-app.include_router(bot_router)  # 🆕 ربط موجه البوت المستقل
-app.include_router(mt5_router)  # 🆕 ربط موجه MT5 لاستقبال بيانات الروبوت
+app.include_router(bot_router)
+app.include_router(mt5_router)
 
-# 8. المسار الرئيسي (لفحص حالة السيرفر من المتصفح)
+# 8. المسار الرئيسي لفحص حالة السيرفر
 @app.get("/")
 def read_root():
     return {
@@ -76,13 +71,10 @@ def health_check():
         "database": "connected"
     }
 
-# 10. إعدادات التشغيل للسيرفرات السحابية (Cloud & Production Ready)
+# 10. إعدادات التشغيل للسحابية والمحلي
 if __name__ == "__main__":
     import uvicorn
     import os
     
-    # قراءة المنفذ المخصص من السحابة، أو استخدام 8000 افتراضياً إذا كان محلياً
     port = int(os.environ.get("PORT", 8000))
-    
-    # التشغيل على 0.0.0.0 ليقبل الاتصالات الخارجية وليس الهاتف فقط
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
