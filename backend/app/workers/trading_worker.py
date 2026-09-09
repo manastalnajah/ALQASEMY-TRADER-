@@ -1,7 +1,7 @@
 import asyncio
 import random
 # استدعاء ملف الاتصال لفتح الجلسات مع قاعدة البيانات
-from app.database import SessionLocal # 👈 تم تعديل المسار ليتوافق مع هيكل المشروع (app.database)
+from database import SessionLocal
 # استدعاء المؤشرات الرياضية
 from app.indicators.moving_average import calculate_sma
 from app.indicators.rsi import calculate_rsi
