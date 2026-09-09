@@ -1,12 +1,10 @@
 import time
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List
-from sqlalchemy import text
-
-# الاستيراد الصحيح المطابق لملفات مشروعك
-from database import SessionLocal 
+from app.db.database import get_db_connection
+from psycopg2.extras import execute_values
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -35,25 +33,25 @@ async def sync_candles(request: CandlesSyncRequest):
         
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
 
-    # 1. تجهيز البيانات كقائمة قواميس
+    # 1. تجهيز البيانات كـ Tuples لتتوافق مع psycopg2 execute_values
     values = []
     for c in request.candles:
-        values.append({
-            "symbol_name": c.symbol,
-            "timeframe": c.timeframe,
-            "open_time": c.open_time,
-            "open": c.open,
-            "high": c.high,
-            "low": c.low,
-            "close": c.close,
-            "volume": c.volume
-        })
+        values.append((
+            c.symbol,
+            c.timeframe,
+            c.open_time,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+            c.volume
+        ))
 
-    # 2. استعلام SQLAlchemy ذكي للإدخال الجماعي السريع
-    insert_query = text("""
+    # 2. استعلام SQL مباشر للإدخال الجماعي وتخطي التكرار
+    insert_query = """
         INSERT INTO candles 
         (symbol_name, timeframe, open_time, open, high, low, close, volume)
-        VALUES (:symbol_name, :timeframe, :open_time, :open, :high, :low, :close, :volume)
+        VALUES %s
         ON CONFLICT (symbol_name, timeframe, open_time) 
         DO UPDATE SET 
             open = EXCLUDED.open,
@@ -61,15 +59,22 @@ async def sync_candles(request: CandlesSyncRequest):
             low = EXCLUDED.low,
             close = EXCLUDED.close,
             volume = EXCLUDED.volume;
-    """)
+    """
 
-    # 3. فتح جلسة الاتصال باستخدام SessionLocal
-    db = SessionLocal()
-    
+    # 3. فتح الاتصال بقاعدة البيانات
+    conn = get_db_connection()
+    if not conn:
+        logger.error("❌ Failed to connect to database for candles sync")
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
     try:
-        # تنفيذ الاستعلام دفعة واحدة (Bulk Execution)
-        db.execute(insert_query, values)
-        db.commit()
+        cursor = conn.cursor()
+        
+        # التنفيذ الجماعي السريع (Bulk Execution)
+        execute_values(cursor, insert_query, values)
+        
+        conn.commit()
+        cursor.close()
         
         elapsed = time.time() - start_time
         logger.info(f"✅ Successfully inserted/updated {len(request.candles)} candles in {elapsed:.4f} seconds")
@@ -81,9 +86,9 @@ async def sync_candles(request: CandlesSyncRequest):
         }
 
     except Exception as e:
-        db.rollback()
+        conn.rollback()
         
-        # التقاط الخطأ الحقيقي وطباعته بوضوح
+        # التقاط الخطأ الحقيقي وطباعته بوضوح إذا حدث
         error_msg = str(e)
         if not error_msg or error_msg.strip() == "":
             error_msg = repr(e)
@@ -92,6 +97,8 @@ async def sync_candles(request: CandlesSyncRequest):
         raise HTTPException(status_code=500, detail=f"Failed to sync candles: {error_msg}")
         
     finally:
-        db.close()
+        conn.close()
 
-# يمكنك إبقاء بقية مساراتك هنا (مثل الأوامر وغيرها)
+# ==========================================
+# الرجاء لصق مساراتك الأخرى هنا (مثل مسار الأوامر /commands إلخ) إذا كانت موجودة في ملفك الأصلي
+# ==========================================
