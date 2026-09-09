@@ -10,32 +10,33 @@ from app.logging.logger import system_logger
 
 
 # ============================================================
-# ALQASEMY TRADER - MULTI-MARKET LIVE TRADING WORKER
+# ALQASEMY TRADER - MULTI-MARKET & MULTI-STRATEGY WORKER
 # ============================================================
 #
 # مسؤولية هذا الملف:
-# 1. قراءة بيانات السوق الحقيقية لعدة أسواق (XAUUSD, EURUSD) من MT5.
-# 2. حساب المؤشرات لكل سوق بشكل مستقل.
-# 3. إرسال بيانات السوق إلى Strategy Service.
+# 1. دعم عدة أسواق نشطة (XAUUSD, EURUSD).
+# 2. تشغيل عدة استراتيجيات بالتوازي (rsi, crossover, scalping).
+# 3. زيادة فرص واقتناص الصفقات الحقيقية بأمان تام.
 # ============================================================
 
 
-SYMBOLS = ["XAUUSD", "EURUSD"]  # دعم السوقين معاً
+SYMBOLS = ["XAUUSD", "EURUSD"]  # الأسواق المفعلة
+STRATEGIES = ["rsi", "crossover", "scalping"]  # شبكة الاستراتيجيات المفعلة بالكامل
 TIMEFRAME = "M5"
 
 # نحتاج بيانات كافية لحساب مؤشر SMA(50)
 CANDLE_LIMIT = 100
 
-# الفاصل الزمني بين دورات الفحص الكاملة للسوقين
+# الفاصل الزمني بين دورات الفحص الشامل
 WORKER_INTERVAL_SECONDS = 5
 
 
-async def analyze_symbol(db, symbol: str):
+async def analyze_symbol_with_strategies(db, symbol: str):
     """
-    تنفيذ دورة تحليل لسوق واحد فقط (مثل الذهب أو اليورو دولار)
+    تحليق سوق معين باستخدام كافة الاستراتيجيات المتاحة
     """
     try:
-        # 1. قراءة آخر الشموع الحقيقية لهذا الرمز
+        # 1. قراءة آخر الشموع الحقيقية لهذا الرمز من قاعدة البيانات
         query = text("""
             SELECT close
             FROM candles
@@ -79,7 +80,7 @@ async def analyze_symbol(db, symbol: str):
             system_logger.warning(f"⚠️ سعر غير صالح لـ {symbol}: {current_price}")
             return
 
-        # 3. حساب المؤشرات الفنية لهذا السوق
+        # 3. حساب المؤشرات الفنية المشتركة لكل الاستراتيجيات
         fast_ma = calculate_sma(price_history, period=10)
         slow_ma = calculate_sma(price_history, period=50)
         rsi_value = calculate_rsi(price_history, period=14)
@@ -94,7 +95,7 @@ async def analyze_symbol(db, symbol: str):
         except (TypeError, ValueError):
             return
 
-        # 4. تجهيز بيانات السوق للاستراتيجية
+        # 4. تجهيز قاموس بيانات السوق الموحد
         market_data = {
             "symbol": symbol,
             "timeframe": TIMEFRAME,
@@ -105,50 +106,63 @@ async def analyze_symbol(db, symbol: str):
         }
 
         system_logger.info(
-            f"📊 [LIVE MARKET M5] "
+            f"📊 [MULTI-STRATEGY M5] "
             f"{symbol} | "
             f"Price={current_price} | "
-            f"SMA10={fast_ma:.2f} | "
-            f"SMA50={slow_ma:.2f} | "
+            f"MA10={fast_ma:.2f} | "
+            f"MA50={slow_ma:.2f} | "
             f"RSI={rsi_value:.2f}"
         )
 
-        # 5. تمرير البيانات إلى Strategy Service للتقييم والتنفيذ المستقل
-        evaluate_and_execute_strategy(
-            db=db,
-            strategy_name="rsi",
-            market_data=market_data,
-        )
+        # 5. المرور على جميع الاستراتيجيات وتقييم السوق عبرها تباعاً
+        for strategy_name in STRATEGIES:
+            # حماية لمنع تكدس الصفقات: فحص ما إذا كان هناك أمر معلق لنفس السوق حالياً
+            check_pending = text("""
+                SELECT count(*) FROM trade_commands 
+                WHERE symbol = :symbol AND status = 'pending'
+            """)
+            count_pending = db.execute(check_pending, {"symbol": symbol}).scalar()
+
+            if count_pending > 0:
+                # إذا وجدنا أمراً معلقاً قيد التنفيذ، نتخطى الفحص المؤقت لمنع التزاحم
+                break
+
+            # تمرير البيانات إلى Strategy Manager عبر خدمة التنفيذ
+            evaluate_and_execute_strategy(
+                db=db,
+                strategy_name=strategy_name,
+                market_data=market_data,
+            )
 
     except Exception as e:
         system_logger.error(
-            f"❌ خطأ في تحليل السوق {symbol}: {type(e).__name__}: {e}"
+            f"❌ خطأ في تحليل السوق {symbol} بالاستراتيجيات المتعددة: {type(e).__name__}: {e}"
         )
 
 
 async def run_trading_cycle():
     """
-    تنفيذ دورة تحليل شاملة لكل الأسواق المفعلة
+    تنفيذ دورة تحليل شاملة لكافة الأسواق والاستراتيجيات
     """
     db = SessionLocal()
     try:
         for symbol in SYMBOLS:
-            await analyze_symbol(db, symbol)
+            await analyze_symbol_with_strategies(db, symbol)
     finally:
         db.close()
 
 
 async def start_background_worker():
     """
-    تشغيل محرك التحليل المتعدد في الخلفية
+    تشغيل محرك التداول متعدد الأسواق والاستراتيجيات في الخلفية
     """
     system_logger.info(
-        "🚀 تشغيل ALQASEMY TRADER Multi-Market Live Trading Worker (XAUUSD & EURUSD)"
+        "🚀 تشغيل ALQASEMY TRADER Multi-Strategy Live Trading Worker"
     )
 
     system_logger.info(
         f"📡 Symbols: {SYMBOLS} | "
-        f"Timeframe: {TIMEFRAME} | "
+        f"Strategies: {STRATEGIES} | "
         f"Interval: {WORKER_INTERVAL_SECONDS}s"
     )
 
