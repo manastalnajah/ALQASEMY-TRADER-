@@ -10,51 +10,32 @@ from app.logging.logger import system_logger
 
 
 # ============================================================
-# ALQASEMY TRADER - LIVE TRADING WORKER
+# ALQASEMY TRADER - MULTI-MARKET LIVE TRADING WORKER
 # ============================================================
 #
 # مسؤولية هذا الملف:
-# 1. قراءة بيانات السوق الحقيقية القادمة من MT5.
-# 2. حساب المؤشرات.
+# 1. قراءة بيانات السوق الحقيقية لعدة أسواق (XAUUSD, EURUSD) من MT5.
+# 2. حساب المؤشرات لكل سوق بشكل مستقل.
 # 3. إرسال بيانات السوق إلى Strategy Service.
-#
-# هذا الملف لا يحتوي على:
-# - BUY إجباري
-# - SELL إجباري
-# - فتح صفقات مباشرة
-# - إغلاق صفقات مباشرة
-# - أسعار عشوائية
-#
-# قرار التداول وتنفيذ الأمر يتمان في الطبقات المخصصة لذلك.
 # ============================================================
 
 
-SYMBOL = "EURUSD"
+SYMBOLS = ["XAUUSD", "EURUSD"]  # دعم السوقين معاً
 TIMEFRAME = "M5"
 
-# نحتاج بيانات أكثر من فترة SMA(50)
-# حتى لا تبدأ الاستراتيجية ببيانات غير كافية.
+# نحتاج بيانات كافية لحساب مؤشر SMA(50)
 CANDLE_LIMIT = 100
 
-# الفاصل بين دورات التحليل.
-# بما أن البيانات M5، لا توجد حاجة لفحص الاستراتيجية كل ثانيتين.
+# الفاصل الزمني بين دورات الفحص الكاملة للسوقين
 WORKER_INTERVAL_SECONDS = 5
 
 
-async def run_trading_cycle():
+async def analyze_symbol(db, symbol: str):
     """
-    تنفيذ دورة تحليل واحدة اعتمادًا على بيانات MT5 الحقيقية.
-
-    لا يتم إنشاء أي أمر تداول إجباري هنا.
+    تنفيذ دورة تحليل لسوق واحد فقط (مثل الذهب أو اليورو دولار)
     """
-
-    db = SessionLocal()
-
     try:
-        # =====================================================
-        # 1. قراءة آخر شموع EURUSD / M5 من قاعدة البيانات
-        # =====================================================
-
+        # 1. قراءة آخر الشموع الحقيقية لهذا الرمز
         query = text("""
             SELECT close
             FROM candles
@@ -68,25 +49,21 @@ async def run_trading_cycle():
         result = db.execute(
             query,
             {
-                "symbol": SYMBOL,
+                "symbol": symbol,
                 "timeframe": TIMEFRAME,
                 "limit": CANDLE_LIMIT,
             },
         ).fetchall()
 
-        # =====================================================
-        # 2. التحقق من توفر بيانات كافية
-        # =====================================================
-
+        # 2. التحقق من توفر بيانات كافية (50 شمعة على الأقل)
         if len(result) < 50:
             system_logger.info(
-                f"⏳ بانتظار بيانات MT5 كافية لـ {SYMBOL} {TIMEFRAME}: "
+                f"⏳ بانتظار بيانات MT5 كافية لـ {symbol} {TIMEFRAME}: "
                 f"{len(result)}/50 شمعة"
             )
             return
 
-        # قاعدة البيانات ترجع الأحدث أولًا.
-        # نقلب القائمة حتى تصبح من الأقدم إلى الأحدث.
+        # ترتيب الأسعار من الأقدم إلى الأحدث
         price_history = [
             float(row[0])
             for row in reversed(result)
@@ -94,66 +71,32 @@ async def run_trading_cycle():
         ]
 
         if len(price_history) < 50:
-            system_logger.info(
-                f"⏳ بيانات الأسعار غير كافية بعد: "
-                f"{len(price_history)}/50"
-            )
             return
 
         current_price = price_history[-1]
 
         if current_price <= 0:
-            system_logger.warning(
-                f"⚠️ سعر غير صالح من MT5: {current_price}"
-            )
+            system_logger.warning(f"⚠️ سعر غير صالح لـ {symbol}: {current_price}")
             return
 
-        # =====================================================
-        # 3. حساب المؤشرات
-        # =====================================================
-
-        fast_ma = calculate_sma(
-            price_history,
-            period=10,
-        )
-
-        slow_ma = calculate_sma(
-            price_history,
-            period=50,
-        )
-
-        rsi_value = calculate_rsi(
-            price_history,
-            period=14,
-        )
-
-        # =====================================================
-        # 4. التحقق من نتائج المؤشرات
-        # =====================================================
+        # 3. حساب المؤشرات الفنية لهذا السوق
+        fast_ma = calculate_sma(price_history, period=10)
+        slow_ma = calculate_sma(price_history, period=50)
+        rsi_value = calculate_rsi(price_history, period=14)
 
         if fast_ma is None or slow_ma is None or rsi_value is None:
-            system_logger.warning(
-                "⚠️ لم يتم الحصول على نتائج صالحة للمؤشرات."
-            )
             return
 
-        # بعض دوال المؤشرات قد تعيد قيمة رقمية غير صالحة.
         try:
             fast_ma = float(fast_ma)
             slow_ma = float(slow_ma)
             rsi_value = float(rsi_value)
         except (TypeError, ValueError):
-            system_logger.warning(
-                "⚠️ تعذر تحويل نتائج المؤشرات إلى أرقام."
-            )
             return
 
-        # =====================================================
-        # 5. تجهيز بيانات السوق للاستراتيجية
-        # =====================================================
-
+        # 4. تجهيز بيانات السوق للاستراتيجية
         market_data = {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe": TIMEFRAME,
             "price": current_price,
             "fast_ma": fast_ma,
@@ -162,30 +105,15 @@ async def run_trading_cycle():
         }
 
         system_logger.info(
-            f"📊 [LIVE M5] "
-            f"{SYMBOL} | "
+            f"📊 [LIVE MARKET M5] "
+            f"{symbol} | "
             f"Price={current_price} | "
-            f"SMA10={fast_ma:.5f} | "
-            f"SMA50={slow_ma:.5f} | "
+            f"SMA10={fast_ma:.2f} | "
+            f"SMA50={slow_ma:.2f} | "
             f"RSI={rsi_value:.2f}"
         )
 
-        # =====================================================
-        # 6. تمرير البيانات إلى Strategy Service
-        # =====================================================
-        #
-        # مهم جدًا:
-        # هذا الملف لا ينشئ BUY أو SELL بنفسه.
-        #
-        # إذا كانت الاستراتيجية تقرر:
-        # BUY  -> service ينشئ الأمر
-        # SELL -> service ينشئ الأمر
-        # HOLD -> لا يوجد أمر
-        # CLOSE -> يجب أن تتعامل معه طبقة إدارة الصفقات
-        #
-        # لذلك لا نضع أي INSERT مباشر إلى trade_commands هنا.
-        # =====================================================
-
+        # 5. تمرير البيانات إلى Strategy Service للتقييم والتنفيذ المستقل
         evaluate_and_execute_strategy(
             db=db,
             strategy_name="rsi",
@@ -194,33 +122,34 @@ async def run_trading_cycle():
 
     except Exception as e:
         system_logger.error(
-            f"❌ خطأ في دورة التداول: "
-            f"{type(e).__name__}: {e}"
+            f"❌ خطأ في تحليل السوق {symbol}: {type(e).__name__}: {e}"
         )
 
+
+async def run_trading_cycle():
+    """
+    تنفيذ دورة تحليل شاملة لكل الأسواق المفعلة
+    """
+    db = SessionLocal()
+    try:
+        for symbol in SYMBOLS:
+            await analyze_symbol(db, symbol)
     finally:
         db.close()
 
 
 async def start_background_worker():
     """
-    تشغيل محرك التحليل في الخلفية.
-
-    يعمل باستمرار على بيانات MT5 الحقيقية.
+    تشغيل محرك التحليل المتعدد في الخلفية
     """
-
     system_logger.info(
-        "🚀 تشغيل ALQASEMY TRADER Live Trading Worker"
+        "🚀 تشغيل ALQASEMY TRADER Multi-Market Live Trading Worker (XAUUSD & EURUSD)"
     )
 
     system_logger.info(
-        f"📡 Symbol: {SYMBOL} | "
+        f"📡 Symbols: {SYMBOLS} | "
         f"Timeframe: {TIMEFRAME} | "
         f"Interval: {WORKER_INTERVAL_SECONDS}s"
-    )
-
-    system_logger.info(
-        "🛑 لا توجد أوامر BUY/SELL إجبارية في هذا العامل."
     )
 
     while True:
@@ -228,9 +157,7 @@ async def start_background_worker():
             await run_trading_cycle()
 
         except asyncio.CancelledError:
-            system_logger.info(
-                "🛑 تم إيقاف Trading Worker."
-            )
+            system_logger.info("🛑 تم إيقاف Trading Worker.")
             raise
 
         except Exception as e:
