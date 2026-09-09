@@ -8,7 +8,7 @@ from sqlalchemy import text
 # الاستيراد الدقيق والصحيح بناءً على ملف database.py الخاص بك
 from database import SessionLocal
 
-@router.post("/api/v1/mt5/candles/sync")
+router = APIRouter(prefix="/api/v1/mt5", tags=["MT5"])
 logger = logging.getLogger(__name__)
 
 class CandleItem(BaseModel):
