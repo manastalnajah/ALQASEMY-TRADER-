@@ -1,6 +1,6 @@
 import time
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
 from app.db.database import get_db_connection
@@ -33,10 +33,9 @@ async def sync_candles(request: CandlesSyncRequest):
         
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
 
-    # 1. تجهيز البيانات كـ Tuples لتتوافق مع psycopg2 execute_values
-    values = []
-    for c in request.candles:
-        values.append((
+    # 1. Prepare data as a list of tuples for psycopg2 execute_values
+    values = [
+        (
             c.symbol,
             c.timeframe,
             c.open_time,
@@ -45,9 +44,11 @@ async def sync_candles(request: CandlesSyncRequest):
             c.low,
             c.close,
             c.volume
-        ))
+        )
+        for c in request.candles
+    ]
 
-    # 2. استعلام SQL مباشر للإدخال الجماعي وتخطي التكرار
+    # 2. SQL query utilizing %s placeholder for execute_values
     insert_query = """
         INSERT INTO candles 
         (symbol_name, timeframe, open_time, open, high, low, close, volume)
@@ -61,7 +62,6 @@ async def sync_candles(request: CandlesSyncRequest):
             volume = EXCLUDED.volume;
     """
 
-    # 3. فتح الاتصال بقاعدة البيانات
     conn = get_db_connection()
     if not conn:
         logger.error("❌ Failed to connect to database for candles sync")
@@ -70,7 +70,7 @@ async def sync_candles(request: CandlesSyncRequest):
     try:
         cursor = conn.cursor()
         
-        # التنفيذ الجماعي السريع (Bulk Execution)
+        # 3. Perform the bulk insert
         execute_values(cursor, insert_query, values)
         
         conn.commit()
@@ -88,17 +88,11 @@ async def sync_candles(request: CandlesSyncRequest):
     except Exception as e:
         conn.rollback()
         
-        # التقاط الخطأ الحقيقي وطباعته بوضوح إذا حدث
-        error_msg = str(e)
-        if not error_msg or error_msg.strip() == "":
-            error_msg = repr(e)
+        # Capture the exact raw error string, preventing silent failures
+        error_msg = str(e) if str(e).strip() else repr(e)
             
         logger.error(f"❌ DATABASE ERROR in candles sync: {error_msg}")
         raise HTTPException(status_code=500, detail=f"Failed to sync candles: {error_msg}")
         
     finally:
         conn.close()
-
-# ==========================================
-# الرجاء لصق مساراتك الأخرى هنا (مثل مسار الأوامر /commands إلخ) إذا كانت موجودة في ملفك الأصلي
-# ==========================================
