@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 from sqlalchemy import text
 
 from database import SessionLocal
@@ -10,33 +11,32 @@ from app.logging.logger import system_logger
 
 
 # ============================================================
-# ALQASEMY TRADER - MULTI-MARKET & MULTI-STRATEGY WORKER
-# ============================================================
-#
-# مسؤولية هذا الملف:
-# 1. دعم عدة أسواق نشطة (XAUUSD, EURUSD).
-# 2. تشغيل عدة استراتيجيات بالتوازي (rsi, crossover, scalping).
-# 3. زيادة فرص واقتناص الصفقات الحقيقية بأمان تام.
+# ALQASEMY TRADER - SECURE MULTI-STRATEGY WORKER (WITH COOLDOWN)
 # ============================================================
 
-
-SYMBOLS = ["XAUUSD", "EURUSD"]  # الأسواق المفعلة
-STRATEGIES = ["rsi", "crossover", "scalping"]  # شبكة الاستراتيجيات المفعلة بالكامل
+SYMBOLS = ["XAUUSD", "EURUSD"]
+STRATEGIES = ["rsi", "crossover", "scalping"]
 TIMEFRAME = "M5"
 
-# نحتاج بيانات كافية لحساب مؤشر SMA(50)
 CANDLE_LIMIT = 100
-
-# الفاصل الزمني بين دورات الفحص الشامل
 WORKER_INTERVAL_SECONDS = 5
+
+# تخزين وقت آخر صفقة تم إرسالها لكل سوق لمنع التكرار الجنوني
+last_trade_times = {}
+COOLDOWN_MINUTES = 3  # فترة تبريد 3 دقائق بين كل صفقة وأخرى لنفس السوق
 
 
 async def analyze_symbol_with_strategies(db, symbol: str):
-    """
-    تحليق سوق معين باستخدام كافة الاستراتيجيات المتاحة
-    """
     try:
-        # 1. قراءة آخر الشموع الحقيقية لهذا الرمز من قاعدة البيانات
+        # 1. التحقق من فترة التبريد (Cooldown) لمنع إغراق السوق بصفقات مكررة
+        global last_trade_times
+        if symbol in last_trade_times:
+            elapsed = datetime.utcnow() - last_trade_times[symbol]
+            if elapsed < timedelta(minutes=COOLDOWN_MINUTES):
+                # لا زال السوق في فترة التبريد، نتخطى التحليل مؤقتاً
+                return
+
+        # 2. قراءة آخر الشموع الحقيقية
         query = text("""
             SELECT close
             FROM candles
@@ -56,15 +56,9 @@ async def analyze_symbol_with_strategies(db, symbol: str):
             },
         ).fetchall()
 
-        # 2. التحقق من توفر بيانات كافية (50 شمعة على الأقل)
         if len(result) < 50:
-            system_logger.info(
-                f"⏳ بانتظار بيانات MT5 كافية لـ {symbol} {TIMEFRAME}: "
-                f"{len(result)}/50 شمعة"
-            )
             return
 
-        # ترتيب الأسعار من الأقدم إلى الأحدث
         price_history = [
             float(row[0])
             for row in reversed(result)
@@ -77,10 +71,9 @@ async def analyze_symbol_with_strategies(db, symbol: str):
         current_price = price_history[-1]
 
         if current_price <= 0:
-            system_logger.warning(f"⚠️ سعر غير صالح لـ {symbol}: {current_price}")
             return
 
-        # 3. حساب المؤشرات الفنية المشتركة لكل الاستراتيجيات
+        # 3. حساب المؤشرات الفنية
         fast_ma = calculate_sma(price_history, period=10)
         slow_ma = calculate_sma(price_history, period=50)
         rsi_value = calculate_rsi(price_history, period=14)
@@ -95,7 +88,6 @@ async def analyze_symbol_with_strategies(db, symbol: str):
         except (TypeError, ValueError):
             return
 
-        # 4. تجهيز قاموس بيانات السوق الموحد
         market_data = {
             "symbol": symbol,
             "timeframe": TIMEFRAME,
@@ -106,7 +98,7 @@ async def analyze_symbol_with_strategies(db, symbol: str):
         }
 
         system_logger.info(
-            f"📊 [MULTI-STRATEGY M5] "
+            f"📊 [SECURE M5] "
             f"{symbol} | "
             f"Price={current_price} | "
             f"MA10={fast_ma:.2f} | "
@@ -114,70 +106,64 @@ async def analyze_symbol_with_strategies(db, symbol: str):
             f"RSI={rsi_value:.2f}"
         )
 
-        # 5. المرور على جميع الاستراتيجيات وتقييم السوق عبرها تباعاً
+        # 4. فحص الأوامر المعلقة أو قيد المعالجة في قاعدة البيانات
+        check_active = text("""
+            SELECT count(*) FROM trade_commands 
+            WHERE symbol = :symbol AND status IN ('pending', 'processing')
+        """)
+        count_active = db.execute(check_active, {"symbol": symbol}).scalar()
+
+        if count_active > 0:
+            system_logger.info(f"⏳ يوجد أمر سابق قيد التنفيذ لـ {symbol}، جاري الانتظار...")
+            return
+
+        # 5. المرور على الاستراتيجيات وتقييم السوق
         for strategy_name in STRATEGIES:
-            # حماية لمنع تكدس الصفقات: فحص ما إذا كان هناك أمر معلق لنفس السوق حالياً
-            check_pending = text("""
-                SELECT count(*) FROM trade_commands 
-                WHERE symbol = :symbol AND status = 'pending'
-            """)
-            count_pending = db.execute(check_pending, {"symbol": symbol}).scalar()
-
-            if count_pending > 0:
-                # إذا وجدنا أمراً معلقاً قيد التنفيذ، نتخطى الفحص المؤقت لمنع التزاحم
-                break
-
-            # تمرير البيانات إلى Strategy Manager عبر خدمة التنفيذ
-            evaluate_and_execute_strategy(
+            # تقييم الاستراتيجية
+            # (نكتفي بأول استراتيجية تعطي إشارة صالحة في هذه الدورة لتجنب تضارب الصفقات)
+            result_decision = evaluate_and_execute_strategy(
                 db=db,
                 strategy_name=strategy_name,
                 market_data=market_data,
             )
 
+            # إذا قامت الاستراتيجية بإصدار أمر حقيقي، نسجل وقت التبريد ونخرج من حلقة الاستراتيجيات
+            if result_decision and result_decision.get("decision") in ["BUY", "SELL"]:
+                last_trade_times[symbol] = datetime.utcnow()
+                break
+
     except Exception as e:
         system_logger.error(
-            f"❌ خطأ في تحليل السوق {symbol} بالاستراتيجيات المتعددة: {type(e).__name__}: {e}"
+            f"❌ خطأ في تحليل السوق {symbol}: {type(e).__name__}: {e}"
         )
 
 
 async def run_trading_cycle():
-    """
-    تنفيذ دورة تحليل شاملة لكافة الأسواق والاستراتيجيات
-    """
     db = SessionLocal()
     try:
         for symbol in SYMBOLS:
             await analyze_symbol_with_strategies(db, symbol)
     finally:
-        db.close()
+      db.close()
 
 
 async def start_background_worker():
-    """
-    تشغيل محرك التداول متعدد الأسواق والاستراتيجيات في الخلفية
-    """
     system_logger.info(
-        "🚀 تشغيل ALQASEMY TRADER Multi-Strategy Live Trading Worker"
+        "🚀 تشغيل محرك التداول الآمن والمحمى (Secure Multi-Strategy Worker)"
     )
-
     system_logger.info(
-        f"📡 Symbols: {SYMBOLS} | "
-        f"Strategies: {STRATEGIES} | "
-        f"Interval: {WORKER_INTERVAL_SECONDS}s"
+        f"📡 Symbols: {SYMBOLS} | Strategies: {STRATEGIES} | Cooldown: {COOLDOWN_MINUTES}m"
     )
 
     while True:
         try:
             await run_trading_cycle()
-
         except asyncio.CancelledError:
             system_logger.info("🛑 تم إيقاف Trading Worker.")
             raise
-
         except Exception as e:
             system_logger.error(
-                f"❌ خطأ غير متوقع في Trading Worker: "
-                f"{type(e).__name__}: {e}"
+                f"❌ خطأ غير متوقع في Trading Worker: {type(e).__name__}: {e}"
             )
 
         await asyncio.sleep(WORKER_INTERVAL_SECONDS)
