@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import List
 from sqlalchemy import text
 
-# 1. الاستيراد الصحيح والمطابق تماماً لملفات مشروعك (بدون أي تخمين)
+# الاستيراد الدقيق والصحيح بناءً على ملف database.py الخاص بك
 from database import SessionLocal
 
 router = APIRouter()
@@ -35,7 +35,7 @@ async def sync_candles(request: CandlesSyncRequest):
         
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
 
-    # 2. تجهيز البيانات كقائمة قواميس لتتوافق مع الإدخال الجماعي لـ SQLAlchemy
+    # 1. تجهيز البيانات كقائمة قواميس لتتوافق مع الإدخال الجماعي لـ SQLAlchemy
     values = []
     for c in request.candles:
         values.append({
@@ -49,7 +49,7 @@ async def sync_candles(request: CandlesSyncRequest):
             "volume": c.volume
         })
 
-    # 3. استعلام ذكي وسريع جداً للإدخال الجماعي (Bulk Insert)
+    # 2. استعلام ذكي وسريع جداً للإدخال الجماعي (Bulk Insert)
     insert_query = text("""
         INSERT INTO candles 
         (symbol_name, timeframe, open_time, open, high, low, close, volume)
@@ -63,11 +63,11 @@ async def sync_candles(request: CandlesSyncRequest):
             volume = EXCLUDED.volume;
     """)
 
-    # 4. فتح الجلسة بقاعدة البيانات باستخدام SessionLocal
+    # 3. فتح الجلسة بقاعدة البيانات
     db = SessionLocal()
     
     try:
-        # تنفيذ الإدخال الجماعي
+        # 4. تنفيذ الإدخال الجماعي
         db.execute(insert_query, values)
         db.commit()
         
@@ -93,3 +93,6 @@ async def sync_candles(request: CandlesSyncRequest):
         
     finally:
         db.close()
+
+# ==========================================
+# (يمكنك إضافة بقية المسارات القديمة الخاصة بك هنا إن وجدت)
