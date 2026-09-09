@@ -16,7 +16,7 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 1. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - بالإدخال الجماعي السريع
+# 1. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - مع تحسين السرعة الفائقة
 # ==========================================
 class CandleItem(BaseModel):
     symbol: str
@@ -36,17 +36,16 @@ class CandlesSyncRequest(BaseModel):
 @router.post("/candles/sync")
 async def sync_candles(request: CandlesSyncRequest):
     start_time = time.time()
-    
+
     if not request.candles:
         return {"status": "success", "message": "No candles provided", "inserted": 0}
-        
+
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
 
     values = []
     latest_candles = {}
 
     for c in request.candles:
-        # تجهيز القيم للإدخال الجماعي لجدول candles
         values.append({
             "symbol_name": c.symbol,
             "timeframe": c.timeframe,
@@ -57,11 +56,10 @@ async def sync_candles(request: CandlesSyncRequest):
             "close": c.close,
             "volume": c.volume
         })
-        
-        # حفظ آخر شمعة لكل رمز لتحديث جدول market_data
+        # الاحتفاظ بآخر شمعة لكل رمز لإنعاش أسعار السوق الحية
         latest_candles[c.symbol] = c
 
-    # استعلام الإدخال الجماعي للشموع
+    # استعلام الإدخال الجماعي للشموع (Bulk Insert)
     insert_candles_query = text("""
         INSERT INTO candles 
         (symbol_name, timeframe, open_time, open, high, low, close, volume)
@@ -76,16 +74,16 @@ async def sync_candles(request: CandlesSyncRequest):
     """)
 
     db = SessionLocal()
-    
+
     try:
-        # 1. تحديث تاريخ الشموع (Bulk Insert)
+        # 🚀 1. تنفيذ الإدخال الجماعي لكل الشموع دفعة واحدة بطلب واحد صاروخي
         db.execute(insert_candles_query, values)
 
         # 2. حفظ أسعار السوق الحية في جدول market_data
         for symbol, c in latest_candles.items():
             change = c.close - c.open
             change_percent = (change / c.open * 100) if c.open > 0 else 0.0
-            
+
             update_market_query = text("""
                 UPDATE market_data 
                 SET bid = :bid, ask = :ask, high = :high, low = :low, 
@@ -99,7 +97,6 @@ async def sync_candles(request: CandlesSyncRequest):
                 "last_updated": datetime.utcnow().isoformat(), "symbol": symbol
             })
 
-            # إذا لم يكن الرمز موجوداً، قم بإضافته
             if result.rowcount == 0:
                 insert_market_query = text("""
                     INSERT INTO market_data 
@@ -114,10 +111,10 @@ async def sync_candles(request: CandlesSyncRequest):
                 })
 
         db.commit()
-        
+
         elapsed = time.time() - start_time
-        logger.info(f"✅ Successfully inserted/updated {len(request.candles)} candles in {elapsed:.4f} seconds")
-        
+        logger.info(f"⚡ Successfully bulk-inserted/updated {len(request.candles)} candles in {elapsed:.4f} seconds")
+
         return {
             "status": "success", 
             "inserted": len(request.candles), 
@@ -129,7 +126,7 @@ async def sync_candles(request: CandlesSyncRequest):
         error_msg = str(e) if str(e).strip() else repr(e)
         logger.error(f"❌ DATABASE ERROR in candles sync: {error_msg}")
         raise HTTPException(status_code=500, detail=f"Failed to sync candles: {error_msg}")
-        
+
     finally:
         db.close()
 
@@ -152,7 +149,7 @@ async def get_pending_commands(ea_id: str = None, limit: int = 10):
             LIMIT :limit
         """)
         result = db.execute(query, {"limit": limit})
-        
+
         commands_list = []
         for row in result:
             commands_list.append({
@@ -163,7 +160,7 @@ async def get_pending_commands(ea_id: str = None, limit: int = 10):
                 "sl": float(row.stop_loss) if row.stop_loss else 0.0,
                 "tp": float(row.take_profit) if row.take_profit else 0.0
             })
-            
+
         return commands_list
     except Exception as e:
         logger.error(f"❌ Error fetching commands: {e}")
@@ -191,7 +188,7 @@ async def report_command(command_id: str, request: Request):
     try:
         data = await request.json()
         status_val = data.get("status", "EXECUTED").lower()
-        
+
         db.execute(text("UPDATE trade_commands SET status = :status WHERE id = :id"), 
                      {"status": status_val, "id": command_id})
         db.commit()
@@ -222,14 +219,14 @@ async def sync_account(request: Request):
     try:
         data = await request.json()
         account_data = data.get("account", {})
-        
+
         account_number = account_data.get("login")
         balance = account_data.get("balance", 0.0)
         equity = account_data.get("equity", 0.0)
         margin = account_data.get("margin", 0.0)
         free_margin = account_data.get("free_margin", 0.0)
         profit = account_data.get("profit", equity - balance)
-        
+
         margin_level = 0.0
         if margin > 0:
             margin_level = (equity / margin) * 100
