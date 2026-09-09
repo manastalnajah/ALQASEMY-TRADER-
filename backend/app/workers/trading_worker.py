@@ -1,7 +1,7 @@
 import asyncio
 import random
 # استدعاء ملف الاتصال لفتح الجلسات مع قاعدة البيانات
-from database import SessionLocal
+from app.database import SessionLocal # 👈 تم تعديل المسار ليتوافق مع هيكل المشروع (app.database)
 # استدعاء المؤشرات الرياضية
 from app.indicators.moving_average import calculate_sma
 from app.indicators.rsi import calculate_rsi
@@ -21,12 +21,12 @@ async def run_trading_cycle():
     # 1. تحديث الأسعار (إضافة سعر الشمعة الجديدة)
     current_price = price_history[-1] + random.uniform(-0.0005, 0.0005)
     price_history.append(current_price)
-    
+
     # 2. حساب المؤشرات الرياضية من الأسعار الحالية
     fast_ma = calculate_sma(price_history, period=10)
     slow_ma = calculate_sma(price_history, period=50)
     rsi_value = calculate_rsi(price_history, period=14)
-    
+
     # 3. تجميع البيانات في قاموس واحد
     market_data = {
         "symbol": "EURUSD",
@@ -35,7 +35,7 @@ async def run_trading_cycle():
         "slow_ma": slow_ma,
         "rsi": rsi_value
     }
-    
+
     # 4. فتح جلسة اتصال سريعة بقاعدة البيانات
     db = SessionLocal()
     try:
@@ -56,10 +56,15 @@ async def start_background_worker():
     """
     محرك التشغيل المستمر (Loop): يعمل في الخلفية ولا يتوقف أبداً
     """
+    # 🆕 تم إضافة الإيقاف هنا لكي لا يتم فتح صفقات وهمية
+    system_logger.warning("⚠️ Trading Worker (Random Data) is disabled for live MT5 testing.")
+    return 
+
+    # 👇 هذا الكود لن يتم تنفيذه بفضل أمر الـ return السابق
     system_logger.info("🚀 تشغيل محرك التداول الآلي في الخلفية...")
     while True:
         await run_trading_cycle()
-        
+
         # الروبوت سينتظر لمدة 60 ثانية (دقيقة) قبل قراءة الشمعة التالية
         # يمكنك تغييرها إلى 5 ثوانٍ للسكالبينج السريع جداً
         await asyncio.sleep(60)
