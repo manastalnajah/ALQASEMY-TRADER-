@@ -16,7 +16,7 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 1. مسار مزامنة الشموع والأسعار (Candles/Specs Sync) - مع تحسين السرعة الفائقة
+# 1. مسار مزامنة الشموع والأسعار (Candles/Specs Sync)
 # ==========================================
 class CandleItem(BaseModel):
     symbol: str
@@ -56,10 +56,8 @@ async def sync_candles(request: CandlesSyncRequest):
             "close": c.close,
             "volume": c.volume
         })
-        # الاحتفاظ بآخر شمعة لكل رمز لإنعاش أسعار السوق الحية
         latest_candles[c.symbol] = c
 
-    # استعلام الإدخال الجماعي للشموع (Bulk Insert)
     insert_candles_query = text("""
         INSERT INTO candles 
         (symbol_name, timeframe, open_time, open, high, low, close, volume)
@@ -76,10 +74,8 @@ async def sync_candles(request: CandlesSyncRequest):
     db = SessionLocal()
 
     try:
-        # 🚀 1. تنفيذ الإدخال الجماعي لكل الشموع دفعة واحدة بطلب واحد صاروخي
         db.execute(insert_candles_query, values)
 
-        # 2. حفظ أسعار السوق الحية في جدول market_data
         for symbol, c in latest_candles.items():
             change = c.close - c.open
             change_percent = (change / c.open * 100) if c.open > 0 else 0.0
