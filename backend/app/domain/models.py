@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Float, DateTime, text
+from sqlalchemy.dialects.postgresql import UUID  # 👈 الاستيراد الصحيح ليتوافق مع نوع UUID في بوستجريز
 from datetime import datetime
 # استدعاء Base من ملف قاعدة البيانات الذي أنشأناه في الجذر
 from database import Base 
@@ -6,8 +7,8 @@ from database import Base
 class TradeCommand(Base):
     __tablename__ = "trade_commands"  # ✅ توجيه الأوامر للجدول الصحيح
 
-    # ✅ التعديل الحاسم هنا: إخبار SQLAlchemy أن الـ id يتم توليده تلقائياً من دالة uuid في السيرفر
-    id = Column(String, primary_key=True, index=True, server_default=text("uuid_generate_v4()"))
+    # ✅ التعديل الحاسم: استخدام UUID(as_uuid=True) لمطابقة نوع القاعدة 100% وتجنب خطأ التضارب
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, server_default=text("uuid_generate_v4()"))
     
     symbol = Column(String, index=True)             # زوج العملات (مثل EURUSD أو XAUUSD)
     order_type = Column(String)                     # نوع الأمر (buy, sell, buy_limit, sell_limit)
