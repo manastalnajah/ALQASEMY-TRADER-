@@ -1,10 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 
 # استدعاء ملف الاتصال بقاعدة البيانات
 from database import get_db
 from app.domain import schemas
-# ⚠️ التعديل هنا: استدعاء الفئة (Class)
 from app.repositories.trade_repo import TradeRepository
 from app.services import trade_service
 
@@ -22,14 +21,16 @@ def create_command(command: schemas.CommandCreate, db: Session = Depends(get_db)
 # 2. مسار جلب الأوامر المعلقة (يستخدمه الميتاتريدر)
 @router.get("/commands/pending", response_model=list[schemas.CommandResponse])
 def get_pending_commands(db: Session = Depends(get_db)):
-    # ⚠️ التعديل هنا
     repo = TradeRepository(db)
     return repo.get_pending_commands()
 
 # 3. مسار تحديث حالة الأمر (يستخدمه الميتاتريدر بعد التنفيذ)
 @router.put("/commands/{command_id}/status", response_model=schemas.CommandResponse)
-def update_command_status(command_id: int, status: str, db: Session = Depends(get_db)):
-    # ⚠️ التعديل هنا
+def update_command_status(
+    command_id: str, # 💡 تم تعديلها إلى str لتقبل الـ UUID الخاص بـ Supabase
+    status: str = Body(..., embed=True), # 💡 تم التعديل ليقرأ الحالة من الـ JSON Body وليس من الرابط
+    db: Session = Depends(get_db)
+):
     repo = TradeRepository(db)
     updated_command = repo.update_command_status(command_id=command_id, new_status=status)
     
