@@ -11,15 +11,16 @@ class StrategyManager:
     """
     def __init__(self):
         # قاموس (Dictionary) يربط كل اسم بالملف الخاص به
-        # تمت إضافة الاستراتيجيات الجديدة هنا
         self._strategies: dict[str, BaseStrategy] = {
             "scalping": ScalpingStrategy(),
             "crossover": MACrossoverStrategy(),
+            # 💡 الحل الجذري هنا: أضفنا هذا السطر ليتطابق تماماً مع الاسم القادم من mt5_router
+            "ma_cross": MACrossoverStrategy(), 
             "rsi": RSIReversalStrategy(),
         }
 
     def execute(self, strategy_name: str, market_data: dict) -> str:
-        # 1. البحث عن الاستراتيجية المطلوبة بالاسم
+        # 1. البحث عن الاستراتيجية المطلوبة بالاسم (مع تحويل الحروف إلى صغيرة لتفادي أخطاء الكتابة)
         strategy = self._strategies.get(strategy_name.lower())
         
         # 2. إذا أدخلت اسماً خاطئاً من التطبيق، يمنع الانهيار
