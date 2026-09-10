@@ -9,7 +9,7 @@ from app.logging.logger import system_logger
 def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: dict):
     """
     هذه الخدمة هي حلقة الوصل المباشرة. 
-    تأخذ بيانات السوق، تدير المخاطر بدقة، تفرض فترة انتظار آمنة، وتفتح الصفقات بأمان.
+    تأخذ بيانات السوق، تدير المخاطر بدقة، تفرض فترة انتظار آمنة، وتضمن صحة أسعار الدخول والحدود.
     """
     symbol = market_data.get("symbol")
     if not symbol:
@@ -52,9 +52,9 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     # التعامل مع الرد (سواء كان قاموساً يحتوي على تفاصيل الحد أو نصاً مباشراً)
     if isinstance(strategy_result, dict):
         decision = strategy_result.get("decision", "HOLD")
-        entry_price = strategy_result.get("entry_price", 0.0)
-        calculated_sl = strategy_result.get("sl", 0.0)
-        calculated_tp = strategy_result.get("tp", 0.0)
+        entry_price = float(strategy_result.get("entry_price", 0.0))
+        calculated_sl = float(strategy_result.get("sl", 0.0))
+        calculated_tp = float(strategy_result.get("tp", 0.0))
     else:
         decision = strategy_result
         entry_price = 0.0
@@ -91,31 +91,43 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     else:
         lot_size = max(0.01, min(1.0, base_lot))
 
-    # إذا لم تحدد الاستراتيجية الوقف والهدف، نحسبهما ديناميكياً كاحتياط
+    # حساب قيمة النقطة
     pip_value = 0.01 if "JPY" in symbol.upper() else 0.0001
     if symbol.upper() == "XAUUSD":
         pip_value = 0.1
 
     current_price = float(market_data.get("close", 0.0))
-    
-    if calculated_sl == 0.0 and current_price > 0:
-        if "BUY" in decision:
-            calculated_sl = round(current_price - (20 * pip_value), 5)
-            calculated_tp = round(current_price + (40 * pip_value), 5)
-        elif "SELL" in decision:
-            calculated_sl = round(current_price + (20 * pip_value), 5)
-            calculated_tp = round(current_price - (40 * pip_value), 5)
 
     # ==========================================
-    # تجهيز وإرسال الأمر (مع دعم أوامر LIMIT وأسعار الدخول)
+    # 🛠️ معالجة وتصحيح سعر الدخول (Entry Price) للأوامر المعلقة لمنع خطأ invalid price
+    # ==========================================
+    if "LIMIT" in decision.upper() and entry_price <= 0.0 and current_price > 0:
+        if decision.upper() == "BUY_LIMIT":
+            entry_price = round(current_price - (15 * pip_value), 5) # سعر معلق أسفل السعر الحالي
+        elif decision.upper() == "SELL_LIMIT":
+            entry_price = round(current_price + (15 * pip_value), 5) # سعر معلق أعلى السعر الحالي
+        system_logger.info(f"🔧 تصحيح تلقائي لسعر الدخول لـ [{symbol}] ({decision}): تم ضبط السعر عند {entry_price}")
+
+    # إذا لم تحدد الاستراتيجية الوقف والهدف، نحسبهما ديناميكياً كاحتياط
+    if calculated_sl == 0.0 and current_price > 0:
+        base_ref_price = entry_price if ("LIMIT" in decision.upper() and entry_price > 0) else current_price
+        if "BUY" in decision.upper():
+            calculated_sl = round(base_ref_price - (20 * pip_value), 5)
+            calculated_tp = round(base_ref_price + (40 * pip_value), 5)
+        elif "SELL" in decision.upper():
+            calculated_sl = round(base_ref_price + (20 * pip_value), 5)
+            calculated_tp = round(base_ref_price - (40 * pip_value), 5)
+
+    # ==========================================
+    # تجهيز وإرسال الأمر
     # ==========================================
     system_logger.info(f"🛡️ إدارة المخاطر لـ [{symbol}]: النوع={decision} | الرصيد={balance} | اللوت={lot_size} | الدخول={entry_price} | الوقف={calculated_sl} | الهدف={calculated_tp}")
 
     new_command = schemas.CommandCreate(
         symbol=symbol,
-        order_type=decision,      # قد يكون BUY, SELL, BUY_LIMIT, SELL_LIMIT
+        order_type=decision,      
         lot_size=lot_size,
-        entry_price=entry_price,  # السعر المحدد للأمر المعلق
+        entry_price=entry_price,  # 👈 مُضمن الآن بقيمة صحيحة ومضبوطة تماماً
         stop_loss=calculated_sl,
         take_profit=calculated_tp
     )
