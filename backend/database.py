@@ -16,13 +16,11 @@ safe_url = SQLALCHEMY_DATABASE_URL.replace("Malek4013%23", "*****")
 print(f"🔗 جاري محاولة الاتصال بالرابط: {safe_url}")
 
 # 3. إعداد محرك الاتصال مع إعدادات الاستقرار وتحسين المهام السحابية
+# 3. إعداد محرك الاتصال بدون وسائط معطوبة
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     pool_pre_ping=True,      # فحص الاتصال قبل تنفيذه لضمان أنه نشط
-    pool_recycle=3600,       # إعادة تدوير الاتصالات كل ساعة لمنع انقطاعها
-    connect_args={
-        "connect_timeout": 30 # زيادة مهلة الاتصال الأولية
-    }
+    pool_recycle=3600        # إعادة تدوير الاتصالات كل ساعة لمنع انقطاعها
 )
 
 # 4. إعداد مصنع الجلسات
