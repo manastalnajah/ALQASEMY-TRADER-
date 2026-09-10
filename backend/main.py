@@ -5,24 +5,37 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # 1. استدعاء الموجهات (Routers) من المجلدات الداخلية
 from app.api.v1.trades_router import router as trades_router
-from app.api.v1.bot_router import router as bot_router  # 🆕 استدعاء موجه البوت الجديد
-from app.api.v1.mt5_router import router as mt5_router  # 🆕 استدعاء بوابة MT5 التي برمجناها للتو
+from app.api.v1.bot_router import router as bot_router  
+from app.api.v1.mt5_router import router as mt5_router  
 
 # 2. استدعاء محرك التداول (Worker) الذي يعمل في الخلفية
 from app.workers.trading_worker import start_background_worker
 
+# ==========================================
 # 3. استدعاء ملفات قاعدة البيانات لإنشاء الجداول تلقائياً
+# (هنا تم وضع كود الحماية الجديد)
+# ==========================================
 from database import engine
 from app.domain import models
+import logging
 
-# التعديل هنا: استدعاء بوابة مراقبة الأداء (Middleware)
+logger = logging.getLogger(__name__)
+
+# استدعاء بوابة مراقبة الأداء (Middleware)
 from app.api.middleware.performance import PerformanceMiddleware
 
-# هذا السطر يقوم بفحص قاعدة البيانات وإنشاء أي جداول مفقودة (مثل جدول commands)
-models.Base.metadata.create_all(bind=engine)
+# 💡 تعديل الحماية: محاولة الاتصال بقاعدة البيانات بأمان
+try:
+    models.Base.metadata.create_all(bind=engine)
+    print("✅ تم الاتصال بقاعدة البيانات والتأكد من الجداول بنجاح.")
+except Exception as e:
+    print(f"❌ كارثة في قاعدة البيانات! السيرفر لم يستطع الاتصال: {e}")
+    # السيرفر سيعمل ولن ينهار، لكنه سيخبرك بالسبب الدقيق في سجلات Render
+# ==========================================
+
 
 # 4. إعداد دورة حياة التطبيق (Lifespan)
-# هذه الدالة السحرية تقوم تشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
+# هذه الدالة السحرية تقوم بتشغيل الروبوت في الخلفية بمجرد إقلاع السيرفر
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- ما يكتب هنا يعمل عند تشغيل السيرفر ---
@@ -52,13 +65,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# التعديل هنا: تفعيل بوابة مراقبة الأداء (يجب أن تضاف هنا بعد تهيئة التطبيق)
+# تفعيل بوابة مراقبة الأداء
 app.add_middleware(PerformanceMiddleware)
 
 # 7. دمج المسارات (Routers) في السيرفر
 app.include_router(trades_router)
-app.include_router(bot_router)  # 🆕 ربط موجه البوت المستقل
-app.include_router(mt5_router)  # 🆕 ربط موجه MT5 لاستقبال بيانات الروبوت
+app.include_router(bot_router)  
+app.include_router(mt5_router)  
 
 # 8. المسار الرئيسي (لفحص حالة السيرفر من المتصفح)
 @app.get("/")
