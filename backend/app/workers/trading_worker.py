@@ -11,7 +11,7 @@ from app.logging.logger import system_logger
 
 # ⚠️ التعديل الجديد: استدعاء حالة البوت من ملف الـ API الذي قمت بإنشائه
 # (يرجى التأكد من مسار الاستيراد حسب اسم المجلد والملف لديك، مثلاً app.api.bot_control)
-from app.api.bot_control import bot_state 
+from app.api.v1.bot_router import bot_state
 
 
 # ============================================================
