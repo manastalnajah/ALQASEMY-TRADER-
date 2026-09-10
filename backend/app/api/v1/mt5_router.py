@@ -6,6 +6,12 @@ from typing import List
 from datetime import datetime
 from sqlalchemy import text
 
+# ==========================================
+# 💡 الإضافة الجديدة 1: استدعاء دالة تشغيل الاستراتيجية
+# ملاحظة: تأكد أن هذا المسار يطابق مكان وجود الدالة في مشروعك
+# ==========================================
+from app.services.strategy_evaluator import evaluate_and_execute_strategy
+
 # الاستيراد الصحيح المطابق لملف قاعدة بياناتك
 from database import SessionLocal
 
@@ -34,7 +40,7 @@ class CandlesSyncRequest(BaseModel):
     ea_id: str
 
 # ==========================================
-# الدالة المنفصلة: لحفظ الشموع في الخلفية (بدون تعطيل المنصة)
+# الدالة المنفصلة: لحفظ الشموع في الخلفية وتشغيل محرك التداول
 # ==========================================
 def process_candles_in_background(request: CandlesSyncRequest):
     start_time = time.time()
@@ -70,8 +76,10 @@ def process_candles_in_background(request: CandlesSyncRequest):
     db = SessionLocal()
 
     try:
+        # 1. حفظ الشموع في قاعدة البيانات
         db.execute(insert_candles_query, values)
 
+        # 2. تحديث بيانات السوق (market_data)
         for symbol, c in latest_candles.items():
             change = c.close - c.open
             change_percent = (change / c.open * 100) if c.open > 0 else 0.0
@@ -106,6 +114,24 @@ def process_candles_in_background(request: CandlesSyncRequest):
 
         elapsed = time.time() - start_time
         logger.info(f"⚡ Successfully bulk-inserted {len(request.candles)} candles in {elapsed:.4f} seconds (BACKGROUND)")
+
+        # ==========================================
+        # 💡 الإضافة الجديدة 2: تشغيل محرك التداول (الخوارزمية) لتحليل السوق فوراً
+        # ==========================================
+        for symbol, c in latest_candles.items():
+            market_data = {
+                "symbol": symbol,
+                "close": c.close,
+                "high": c.high,
+                "low": c.low,
+                "open": c.open
+            }
+            try:
+                # استدعاء الاستراتيجية (تأكد أن اسم الاستراتيجية "MA_Cross" مطابق لما لديك)
+                result = evaluate_and_execute_strategy(db, "MA_Cross", market_data)
+                logger.info(f"⚙️ نتيجة تحليل خوارزمية التداول لـ {symbol}: {result}")
+            except Exception as strat_error:
+                logger.error(f"❌ خطأ أثناء تنفيذ استراتيجية التداول لـ {symbol}: {strat_error}")
 
     except Exception as e:
         db.rollback()
