@@ -9,7 +9,7 @@ from app.logging.logger import system_logger
 def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: dict):
     """
     هذه الخدمة هي حلقة الوصل المباشرة. 
-    تأخذ بيانات السوق، تسأل الاستراتيجية، تمنع التكرار العشوائي، وتفتح الصفقة بأمان.
+    تأخذ بيانات السوق، تدير المخاطر ورأس المال، تمنع التكرار، وتفتح الصفقة بحماية كاملة.
     """
     symbol = market_data.get("symbol")
     if not symbol:
@@ -18,9 +18,8 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     system_logger.info(f"🔄 بدء تقييم السوق لـ [{symbol}] باستخدام استراتيجية: {strategy_name}")
 
     # ==========================================
-    # 🛡️ نظام الحماية: التحقق من الأوامر المعلقة
+    # 🛡️ نظام الحماية الأول: التحقق من الأوامر المعلقة لمنع التكدس
     # ==========================================
-    # نمنع البوت من إصدار إشارة جديدة إذا كان هناك أمر معلق أو جاري تنفيذه لنفس الرمز
     check_pending_query = text("""
         SELECT id FROM trade_commands 
         WHERE symbol = :symbol AND status IN ('pending', 'processing')
@@ -31,6 +30,20 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
         system_logger.warning(f"🛡️ حماية: يوجد أمر لم ينفذ بعد لـ [{symbol}]. تم تجاهل الإشارة لمنع التكدس.")
         return {"status": "ignored", "decision": "HOLD", "message": "Pending command exists"}
 
+    # ==========================================
+    # 🛡️ نظام الحماية الثاني: مانع التكرار السريع (Anti-Spam Cooldown)
+    # ==========================================
+    check_spam_query = text("""
+        SELECT id FROM trade_commands 
+        WHERE symbol = :symbol 
+        AND created_at >= NOW() - INTERVAL '1 minute'
+    """)
+    spam_check = db.execute(check_spam_query, {"symbol": symbol}).fetchone()
+    
+    if spam_check:
+        system_logger.warning(f"🛡️ حماية ضد التكرار: تم إصدار أمر قريب جداً لـ [{symbol}]. جاري الانتظار...")
+        return {"status": "ignored", "decision": "HOLD", "message": "Cooldown active"}
+
     # 1. إرسال البيانات لمدير الاستراتيجيات لتحليلها
     decision = strategy_manager.execute(strategy_name, market_data)
 
@@ -39,36 +52,65 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
         return {"status": "success", "decision": "HOLD", "message": "No trade executed"}
 
     # ==========================================
-    # 🛡️ نظام الحماية: منع فتح صفقات متكررة في نفس الاتجاه
+    # 🧠 وحدة إدارة المخاطر والتحكم في رأس المال
     # ==========================================
-    # نمنع البوت من فتح صفقة شراء جديدة إذا كان قد فتح صفقة شراء بالفعل قبل وقت قريب
-    check_executed_query = text("""
-        SELECT id FROM trade_commands 
-        WHERE symbol = :symbol 
-        AND order_type = :decision 
-        AND status = 'executed' 
-        AND created_at >= NOW() - INTERVAL '1 hour' -- يمنع فتح صفقة بنفس الاتجاه لمدة ساعة من آخر إشارة
-    """)
-    recently_executed = db.execute(check_executed_query, {"symbol": symbol, "decision": decision}).fetchone()
-
-    if recently_executed:
-        system_logger.warning(f"🛡️ حماية: البوت قام بفتح صفقة {decision} لـ [{symbol}] مسبقاً. لن يتم فتح صفقة أخرى لتجنب المخاطرة المتكررة.")
-        return {"status": "ignored", "decision": "HOLD", "message": "Trade already opened recently"}
-
-    # 3. إذا مر من الحماية والقرار (BUY) أو (SELL)، نجهز أمر التداول
-    system_logger.info(f"⚡ قرار الاستراتيجية لـ [{symbol}]: {decision}! جاري تجهيز أمر التداول...")
+    # جلب رصيد الحساب ومستوى الهامش المباشر من جدول trading_accounts
+    account = db.execute(text("SELECT balance, margin_level FROM trading_accounts LIMIT 1")).fetchone()
     
-    lot_size = 0.01 if symbol.upper() == "XAUUSD" else 0.1
+    balance = 1000.0  # قيمة افتراضية في حال عدم المزامنة بعد
+    margin_level = 0.0
+
+    if account:
+        balance = float(account.balance or 1000.0)
+        margin_level = float(account.margin_level or 0.0)
+        
+        # مكابح الطوارئ: إيقاف التداول فورا إذا اقترب الحساب من المارجن كول (< 300%)
+        if margin_level > 0 and margin_level < 300:
+            system_logger.critical(f"⚠️ تحذير خطير: مستوى الهامش منخفض جداً ({margin_level}%). تم حظر فتح صفقات جديدة!")
+            return {"status": "ignored", "decision": "HOLD", "message": "Low margin safety block"}
+
+    # حساب حجم العقد (Lot Size) بناءً على نسبة مخاطرة 1% من الرصيد
+    risk_percentage = 0.01 
+    base_lot = round((balance * risk_percentage) / 1000, 2)
+    
+    if symbol.upper() == "XAUUSD":
+        lot_size = max(0.01, min(0.1, base_lot / 10))  # حماية إضافية للذهب
+    else:
+        lot_size = max(0.01, min(1.0, base_lot))       # لعملات الفوركس الرئيسية
+
+    # حساب نقاط وقف الخسارة (SL) وجني الأرباح (TP) ديناميكياً
+    pip_value = 0.01 if "JPY" in symbol.upper() else 0.0001
+    if symbol.upper() == "XAUUSD":
+        pip_value = 0.1
+
+    current_price = float(market_data.get("close", 0.0))
+    sl_price = 0.0
+    tp_price = 0.0
+
+    if current_price > 0:
+        if decision == "BUY":
+            sl_price = round(current_price - (20 * pip_value), 5)  # وقف خسارة 20 نقطة
+            tp_price = round(current_price + (40 * pip_value), 5)  # جني أرباح 40 نقطة (عائد 1:2)
+        elif decision == "SELL":
+            sl_price = round(current_price + (20 * pip_value), 5)  # وقف خسارة 20 نقطة
+            tp_price = round(current_price - (40 * pip_value), 5)  # جني أرباح 40 نقطة
+
+    # ==========================================
+    # 3. تجهيز وإرسال أمر التداول الآمن
+    # ==========================================
+    system_logger.info(f"🛡️ إدارة المخاطر لـ [{symbol}]: الرصيد={balance} | اللوت={lot_size} | الوقف={sl_price} | الهدف={tp_price}")
 
     new_command = schemas.CommandCreate(
         symbol=symbol,
         order_type=decision,
-        lot_size=lot_size
+        lot_size=lot_size,
+        stop_loss=sl_price,
+        take_profit=tp_price
     )
 
-    # 4. إرسال الأمر للحفظ
+    # 4. إرسال الأمر للاعتماد والحفظ في جدول trade_commands
     executed_command = trade_service.process_new_command(db=db, command=new_command)
-    system_logger.info(f"✅ تم إنشاء أمر جديد بأمان لـ [{symbol}] | النوع: {decision} | رقم الأمر: {executed_command.id}")
+    system_logger.info(f"✅ تم إنشاء أمر ذكي وآمن لـ [{symbol}] | النوع: {decision} | رقم الأمر: {executed_command.id}")
 
     return {
         "status": "success", 
