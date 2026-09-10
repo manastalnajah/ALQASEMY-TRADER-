@@ -167,4 +167,3 @@ async def start_background_worker():
             )
 
         await asyncio.sleep(WORKER_INTERVAL_SECONDS)
- هذا الملف قم باصلاحه
