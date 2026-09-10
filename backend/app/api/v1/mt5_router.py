@@ -1,6 +1,6 @@
 import time
 import logging
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import List
 from datetime import datetime
@@ -16,7 +16,7 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 1. مسار مزامنة الشموع والأسعار (Candles/Specs Sync)
+# النماذج (Models)
 # ==========================================
 class CandleItem(BaseModel):
     symbol: str
@@ -33,15 +33,11 @@ class CandlesSyncRequest(BaseModel):
     source: str
     ea_id: str
 
-@router.post("/candles/sync")
-async def sync_candles(request: CandlesSyncRequest):
+# ==========================================
+# الدالة المنفصلة: لحفظ الشموع في الخلفية (بدون تعطيل المنصة)
+# ==========================================
+def process_candles_in_background(request: CandlesSyncRequest):
     start_time = time.time()
-
-    if not request.candles:
-        return {"status": "success", "message": "No candles provided", "inserted": 0}
-
-    logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id}")
-
     values = []
     latest_candles = {}
 
@@ -109,26 +105,36 @@ async def sync_candles(request: CandlesSyncRequest):
         db.commit()
 
         elapsed = time.time() - start_time
-        logger.info(f"⚡ Successfully bulk-inserted/updated {len(request.candles)} candles in {elapsed:.4f} seconds")
-
-        return {
-            "status": "success", 
-            "inserted": len(request.candles), 
-            "time_seconds": round(elapsed, 4)
-        }
+        logger.info(f"⚡ Successfully bulk-inserted {len(request.candles)} candles in {elapsed:.4f} seconds (BACKGROUND)")
 
     except Exception as e:
         db.rollback()
         error_msg = str(e) if str(e).strip() else repr(e)
-        logger.error(f"❌ DATABASE ERROR in candles sync: {error_msg}")
-        raise HTTPException(status_code=500, detail=f"Failed to sync candles: {error_msg}")
+        logger.error(f"❌ DATABASE ERROR in background candles sync: {error_msg}")
 
     finally:
         db.close()
 
-@router.post("/specs/sync")
-async def sync_specs(request: Request):
-    return {"status": "success", "message": "Symbol specifications synced"}
+
+# ==========================================
+# 1. مسار مزامنة الشموع والأسعار (الآن يعمل كالبرق)
+# ==========================================
+@router.post("/candles/sync")
+async def sync_candles(request: CandlesSyncRequest, background_tasks: BackgroundTasks):
+    if not request.candles:
+        return {"status": "success", "message": "No candles provided", "inserted": 0}
+
+    logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id} - Processing in background...")
+
+    # 💡 السر هنا: نأمر الباك إند بتنفيذ العمل الشاق في الخلفية
+    background_tasks.add_task(process_candles_in_background, request)
+
+    # ونرد فوراً في أجزاء من الثانية ليحرر الميتاتريدر وينفذ الصفقات!
+    return {
+        "status": "success", 
+        "inserted": len(request.candles), 
+        "message": "Candles received. Processing fast in background."
+    }
 
 # ==========================================
 # 2. مسار الأوامر (Commands)
@@ -206,8 +212,17 @@ async def receive_mt5_updates(request: Request):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 # ==========================================
-# 3. مسار مزامنة الحساب (Account Sync)
+# 3. مسار المواصفات (Specs Sync)
+# ==========================================
+@router.post("/specs/sync")
+async def sync_specs(request: Request):
+    return {"status": "success", "message": "Symbol specifications synced"}
+
+
+# ==========================================
+# 4. مسار مزامنة الحساب (Account Sync)
 # ==========================================
 @router.post("/account/sync")
 async def sync_account(request: Request):
@@ -251,11 +266,11 @@ async def sync_account(request: Request):
                 "account_number": account_number
             })
             db.commit()
-            logger.info(f"✅ Database Updated via SQLAlchemy for account: {account_number} | Balance: {balance}")
+            logger.info(f"✅ Database Updated for account: {account_number} | Balance: {balance}")
 
         return {
             "status": "success", 
-            "message": "Account data synced and updated in database successfully"
+            "message": "Account data synced successfully"
         }
     except Exception as e:
         db.rollback()
@@ -267,8 +282,9 @@ async def sync_account(request: Request):
     finally:
         db.close()
 
+
 # ==========================================
-# 4. مسار نبض الاتصال (Heartbeat) وتحديث الرصيد المباشر
+# 5. مسار نبض الاتصال (Heartbeat) وتحديث الرصيد المباشر
 # ==========================================
 class AccountHeartbeat(BaseModel):
     account_number: int
