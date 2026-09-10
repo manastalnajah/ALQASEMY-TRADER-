@@ -126,8 +126,8 @@ def process_candles_in_background(request: CandlesSyncRequest):
             
             # حساب المتوسطات الحسابية (تتطلب على الأقل 15 شمعة)
             if len(symbol_closes) >= 15:
-                fast_ma = sum(symbol_closes[-5:]) / 5     # المتوسط السريع لآخر 5 شموع
-                slow_ma = sum(symbol_closes[-15:]) / 15   # المتوسط البطيء لآخر 15 شمعة
+                fast_ma = sum(symbol_closes[-20:]) / 20     # المتوسط السريع لآخر 5 شموع
+                slow_ma = sum(symbol_closes[-50:]) / 50   # المتوسط البطيء لآخر 15 شمعة
 
             # تغذية عقل البوت بالبيانات والمؤشرات المطلوبة
             market_data = {
