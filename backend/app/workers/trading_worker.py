@@ -9,6 +9,10 @@ from app.indicators.rsi import calculate_rsi
 from app.services.strategy_service import evaluate_and_execute_strategy
 from app.logging.logger import system_logger
 
+# ⚠️ التعديل الجديد: استدعاء حالة البوت من ملف الـ API الذي قمت بإنشائه
+# (يرجى التأكد من مسار الاستيراد حسب اسم المجلد والملف لديك، مثلاً app.api.bot_control)
+from app.api.bot_control import bot_state 
+
 
 # ============================================================
 # ALQASEMY TRADER - SECURE MULTI-STRATEGY WORKER (WITH COOLDOWN)
@@ -139,12 +143,16 @@ async def analyze_symbol_with_strategies(db, symbol: str):
 
 
 async def run_trading_cycle():
+    # 💡 التعديل الأهم: التحقق من حالة البوت قبل فتح قاعدة البيانات أو إرهاق السيرفر
+    if not bot_state.get("is_running", False):
+        return  # البوت مطفأ من التطبيق، انسحاب هادئ دون فعل أي شيء
+
     db = SessionLocal()
     try:
         for symbol in SYMBOLS:
             await analyze_symbol_with_strategies(db, symbol)
     finally:
-      db.close()
+        db.close()
 
 
 async def start_background_worker():
