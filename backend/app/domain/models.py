@@ -6,13 +6,13 @@ from database import Base
 class TradeCommand(Base):
     __tablename__ = "trade_commands"  # ✅ توجيه الأوامر للجدول الصحيح
 
-    # تغيير الـ id إلى String ليتوافق مع الـ UUID
-    id = Column(String, primary_key=True, index=True)
+    # ✅ التعديل الحاسم هنا: إخبار SQLAlchemy بألا تتوقع توليداً تلقائياً، لأن بايثون سيمرر الـ UUID جاهزاً
+    id = Column(String, primary_key=True, index=True, autoincrement=False)
     
     symbol = Column(String, index=True)             # زوج العملات (مثل EURUSD أو XAUUSD)
     order_type = Column(String)                     # نوع الأمر (buy, sell, buy_limit, sell_limit)
     lot_size = Column(Float)                        # حجم العقد (اللوت)
-    entry_price = Column(Float, default=0.0)        # 👈 العمود الجديد: سعر الدخول للأوامر المعلقة
+    entry_price = Column(Float, default=0.0)        # سعر الدخول للأوامر المعلقة
     stop_loss = Column(Float, default=0.0)          # وقف الخسارة
     take_profit = Column(Float, default=0.0)        # جني الأرباح
     status = Column(String, default="pending")      # حالة الأمر (pending, executed, failed)
