@@ -7,11 +7,11 @@ from datetime import datetime
 from sqlalchemy import text
 
 # ==========================================
-# 💡 الإضافة الجديدة 1: استدعاء دالة تشغيل الاستراتيجية
+# استدعاء دالة تشغيل الاستراتيجية الذكية
 # ==========================================
 from app.services.strategy_evaluator import evaluate_and_execute_strategy
 
-# الاستيراد الصحيح المطابق لملف قاعدة بياناتك
+# الاستيراد المطابق لملف قاعدة بياناتك
 from database import SessionLocal
 
 router = APIRouter(
@@ -39,7 +39,7 @@ class CandlesSyncRequest(BaseModel):
     ea_id: str
 
 # ==========================================
-# الدالة المنفصلة: لحفظ الشموع في الخلفية وتشغيل محرك التداول
+# الدالة المنفصلة: لحفظ الشموع وتشغيل التحليل الذكي للحدود
 # ==========================================
 def process_candles_in_background(request: CandlesSyncRequest):
     start_time = time.time()
@@ -115,36 +115,37 @@ def process_candles_in_background(request: CandlesSyncRequest):
         logger.info(f"⚡ Successfully bulk-inserted {len(request.candles)} candles in {elapsed:.4f} seconds (BACKGROUND)")
 
         # ==========================================
-        # 💡 الإضافة الجديدة 2: تشغيل محرك التداول (الخوارزمية) مع حساب المتوسطات
+        # 💡 تشغيل خوارزمية الحدود الذكية (Smart Limits)
         # ==========================================
         for symbol, c in latest_candles.items():
-            # استخراج أسعار الإغلاق للرمز الحالي من الشموع التي أرسلها الميتاتريدر
-            symbol_closes = [candle.close for candle in request.candles if candle.symbol == symbol]
+            symbol_candles = [candle for candle in request.candles if candle.symbol == symbol]
             
-            fast_ma = None
-            slow_ma = None
+            support = None
+            resistance = None
             
-            # حساب المتوسطات الحسابية (تتطلب على الأقل 15 شمعة)
-            if len(symbol_closes) >= 15:
-                fast_ma = sum(symbol_closes[-20:]) / 20     # المتوسط السريع لآخر 5 شموع
-                slow_ma = sum(symbol_closes[-50:]) / 50   # المتوسط البطيء لآخر 15 شمعة
+            # حساب الدعم والمقاومة بناءً على الشموع المتاحة
+            if len(symbol_candles) >= 10:
+                recent_lows = [candle.low for candle in symbol_candles]
+                recent_highs = [candle.high for candle in symbol_candles]
+                
+                support = min(recent_lows)       # قاع السوق المحتمل
+                resistance = max(recent_highs)   # قمة السوق المحتملة
 
-            # تغذية عقل البوت بالبيانات والمؤشرات المطلوبة
             market_data = {
                 "symbol": symbol,
                 "close": c.close,
                 "high": c.high,
                 "low": c.low,
                 "open": c.open,
-                "fast_ma": fast_ma,
-                "slow_ma": slow_ma
+                "support": support,
+                "resistance": resistance
             }
             try:
-                # استدعاء الاستراتيجية
-                result = evaluate_and_execute_strategy(db, "ma_cross", market_data)
-                logger.info(f"⚙️ نتيجة تحليل خوارزمية التداول لـ {symbol}: {result}")
+                # استدعاء استراتيجية الحدود الذكية بالاسم الجديد
+                result = evaluate_and_execute_strategy(db, "smart_limits", market_data)
+                logger.info(f"⚙️ نتيجة التحليل الذكي لـ {symbol}: {result}")
             except Exception as strat_error:
-                logger.error(f"❌ خطأ أثناء تنفيذ استراتيجية التداول لـ {symbol}: {strat_error}")
+                logger.error(f"❌ خطأ أثناء التحليل الذكي لـ {symbol}: {strat_error}")
 
     except Exception as e:
         db.rollback()
@@ -156,7 +157,7 @@ def process_candles_in_background(request: CandlesSyncRequest):
 
 
 # ==========================================
-# 1. مسار مزامنة الشموع والأسعار (الآن يعمل كالبرق)
+# 1. مسار مزامنة الشموع والأسعار
 # ==========================================
 @router.post("/candles/sync")
 async def sync_candles(request: CandlesSyncRequest, background_tasks: BackgroundTasks):
@@ -164,8 +165,6 @@ async def sync_candles(request: CandlesSyncRequest, background_tasks: Background
         return {"status": "success", "message": "No candles provided", "inserted": 0}
 
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id} - Processing in background...")
-
-    # نأمر الباك إند بتنفيذ العمل الشاق في الخلفية
     background_tasks.add_task(process_candles_in_background, request)
 
     return {
@@ -181,8 +180,9 @@ async def sync_candles(request: CandlesSyncRequest, background_tasks: Background
 async def get_pending_commands(ea_id: str = None, limit: int = 10):
     db = SessionLocal()
     try:
+        # تأكد أن جدول trade_commands يحتوي على حقل entry_price للأوامر المعلقة
         query = text("""
-            SELECT id, symbol, order_type, lot_size, stop_loss, take_profit 
+            SELECT id, symbol, order_type, lot_size, stop_loss, take_profit, entry_price 
             FROM trade_commands 
             WHERE status = 'pending' 
             ORDER BY created_at ASC
@@ -197,6 +197,7 @@ async def get_pending_commands(ea_id: str = None, limit: int = 10):
                 "symbol": row.symbol,
                 "side": str(row.order_type).upper(),
                 "volume": float(row.lot_size),
+                "entry_price": float(row.entry_price) if hasattr(row, 'entry_price') and row.entry_price else 0.0,
                 "sl": float(row.stop_loss) if row.stop_loss else 0.0,
                 "tp": float(row.take_profit) if row.take_profit else 0.0
             })
@@ -322,7 +323,7 @@ async def sync_account(request: Request):
 
 
 # ==========================================
-# 5. مسار نبض الاتصال (Heartbeat) وتحديث الرصيد المباشر
+# 5. مسار نبض الاتصال (Heartbeat)
 # ==========================================
 class AccountHeartbeat(BaseModel):
     account_number: int
