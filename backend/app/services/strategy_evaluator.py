@@ -9,7 +9,7 @@ from app.logging.logger import system_logger
 def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: dict):
     """
     هذه الخدمة هي حلقة الوصل المباشرة. 
-    تأخذ بيانات السوق، تدير المخاطر، تدعم الأوامر المعلقة والحدود الذكية، وتفتح الصفقات بأمان.
+    تأخذ بيانات السوق، تدير المخاطر بدقة، تفرض فترة انتظار آمنة، وتفتح الصفقات بأمان.
     """
     symbol = market_data.get("symbol")
     if not symbol:
@@ -18,7 +18,7 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     system_logger.info(f"🔄 بدء تقييم السوق لـ [{symbol}] باستخدام استراتيجية: {strategy_name}")
 
     # ==========================================
-    # 🛡️ نظام الحماية الأول: التحقق من الأوامر المعلقة لمنع التكدس
+    # 🛡️ نظام الحماية الأول: التحقق التام من وجود أمر معلق أو قيد المعالجة
     # ==========================================
     check_pending_query = text("""
         SELECT id FROM trade_commands 
@@ -27,22 +27,22 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     is_pending = db.execute(check_pending_query, {"symbol": symbol}).fetchone()
     
     if is_pending:
-        system_logger.warning(f"🛡️ حماية: يوجد أمر لم ينفذ بعد لـ [{symbol}]. تم تجاهل الإشارة لمنع التكدس.")
+        system_logger.warning(f"🛡️ حماية قصوى: يوجد أمر معلق أو قيد التنفيذ لـ [{symbol}]. تم تجاهل الإشارة تماماً لمنع التكدس.")
         return {"status": "ignored", "decision": "HOLD", "message": "Pending command exists"}
 
     # ==========================================
-    # 🛡️ نظام الحماية الثاني: مانع التكرار السريع (Anti-Spam Cooldown)
+    # 🛡️ نظام الحماية الثاني: حظر مؤقت صارم (Cooldown) لمدة 5 دقائق كاملة
     # ==========================================
-    check_spam_query = text("""
+    check_cooldown_query = text("""
         SELECT id FROM trade_commands 
         WHERE symbol = :symbol 
-        AND created_at >= NOW() - INTERVAL '1 minute'
+        AND created_at >= NOW() - INTERVAL '5 minutes'
     """)
-    spam_check = db.execute(check_spam_query, {"symbol": symbol}).fetchone()
+    cooldown_check = db.execute(check_cooldown_query, {"symbol": symbol}).fetchone()
     
-    if spam_check:
-        system_logger.warning(f"🛡️ حماية ضد التكرار: تم إصدار أمر قريب جداً لـ [{symbol}]. جاري الانتظار...")
-        return {"status": "ignored", "decision": "HOLD", "message": "Cooldown active"}
+    if cooldown_check:
+        system_logger.warning(f"🛡️ حماية الوقت (Cooldown): تم تنفيذ أمر مؤخراً لـ [{symbol}]. يجب الانتظار 5 دقائق بين الصفقات.")
+        return {"status": "ignored", "decision": "HOLD", "message": "Cooldown active for 5 minutes"}
 
     # ==========================================
     # 🧠 استلام القرار الشامل من الاستراتيجية (دعم الأوامر المعلقة والحدود)
@@ -115,7 +115,7 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
         symbol=symbol,
         order_type=decision,      # قد يكون BUY, SELL, BUY_LIMIT, SELL_LIMIT
         lot_size=lot_size,
-        entry_price=entry_price,  # 👈 السعر المحدد للأمر المعلق
+        entry_price=entry_price,  # السعر المحدد للأمر المعلق
         stop_loss=calculated_sl,
         take_profit=calculated_tp
     )
