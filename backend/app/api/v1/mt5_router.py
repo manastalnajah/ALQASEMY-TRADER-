@@ -8,7 +8,6 @@ from sqlalchemy import text
 
 # ==========================================
 # 💡 الإضافة الجديدة 1: استدعاء دالة تشغيل الاستراتيجية
-# ملاحظة: تأكد أن هذا المسار يطابق مكان وجود الدالة في مشروعك
 # ==========================================
 from app.services.strategy_evaluator import evaluate_and_execute_strategy
 
@@ -116,19 +115,33 @@ def process_candles_in_background(request: CandlesSyncRequest):
         logger.info(f"⚡ Successfully bulk-inserted {len(request.candles)} candles in {elapsed:.4f} seconds (BACKGROUND)")
 
         # ==========================================
-        # 💡 الإضافة الجديدة 2: تشغيل محرك التداول (الخوارزمية) لتحليل السوق فوراً
+        # 💡 الإضافة الجديدة 2: تشغيل محرك التداول (الخوارزمية) مع حساب المتوسطات
         # ==========================================
         for symbol, c in latest_candles.items():
+            # استخراج أسعار الإغلاق للرمز الحالي من الشموع التي أرسلها الميتاتريدر
+            symbol_closes = [candle.close for candle in request.candles if candle.symbol == symbol]
+            
+            fast_ma = None
+            slow_ma = None
+            
+            # حساب المتوسطات الحسابية (تتطلب على الأقل 15 شمعة)
+            if len(symbol_closes) >= 15:
+                fast_ma = sum(symbol_closes[-5:]) / 5     # المتوسط السريع لآخر 5 شموع
+                slow_ma = sum(symbol_closes[-15:]) / 15   # المتوسط البطيء لآخر 15 شمعة
+
+            # تغذية عقل البوت بالبيانات والمؤشرات المطلوبة
             market_data = {
                 "symbol": symbol,
                 "close": c.close,
                 "high": c.high,
                 "low": c.low,
-                "open": c.open
+                "open": c.open,
+                "fast_ma": fast_ma,
+                "slow_ma": slow_ma
             }
             try:
-                # استدعاء الاستراتيجية (تأكد أن اسم الاستراتيجية "MA_Cross" مطابق لما لديك)
-                result = evaluate_and_execute_strategy(db, "MA_Cross", market_data)
+                # استدعاء الاستراتيجية
+                result = evaluate_and_execute_strategy(db, "ma_cross", market_data)
                 logger.info(f"⚙️ نتيجة تحليل خوارزمية التداول لـ {symbol}: {result}")
             except Exception as strat_error:
                 logger.error(f"❌ خطأ أثناء تنفيذ استراتيجية التداول لـ {symbol}: {strat_error}")
@@ -152,10 +165,9 @@ async def sync_candles(request: CandlesSyncRequest, background_tasks: Background
 
     logger.info(f"📥 Received {len(request.candles)} candles for EA: {request.ea_id} - Processing in background...")
 
-    # 💡 السر هنا: نأمر الباك إند بتنفيذ العمل الشاق في الخلفية
+    # نأمر الباك إند بتنفيذ العمل الشاق في الخلفية
     background_tasks.add_task(process_candles_in_background, request)
 
-    # ونرد فوراً في أجزاء من الثانية ليحرر الميتاتريدر وينفذ الصفقات!
     return {
         "status": "success", 
         "inserted": len(request.candles), 
