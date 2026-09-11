@@ -45,13 +45,17 @@ def process_candles_in_background(request: CandlesSyncRequest):
     start_time = time.time()
     values = []
     
-    # 🔥 التعديل الأول: تجميع الشموع بناءً على الرمز والإطار الزمني معاً لمنع التداخل
     latest_candles = {}
 
     for c in request.candles:
+        # 🔥 الحل الجذري: تنظيف الإطار الزمني إذا كان CURRENT لتجنب مشاكل قاعدة البيانات
+        tf = c.timeframe
+        if not tf or tf.upper() == "CURRENT":
+            tf = "H1"  # القيمة الافتراضية المتوافقة مع تشغيلك على شارت الساعة
+
         values.append({
             "symbol_name": c.symbol,
-            "timeframe": c.timeframe,
+            "timeframe": tf,
             "open_time": c.open_time,
             "open": c.open,
             "high": c.high,
@@ -59,7 +63,7 @@ def process_candles_in_background(request: CandlesSyncRequest):
             "close": c.close,
             "volume": c.volume
         })
-        latest_candles[(c.symbol, c.timeframe)] = c
+        latest_candles[(c.symbol, tf)] = c
 
     insert_candles_query = text("""
         INSERT INTO candles 
@@ -120,8 +124,7 @@ def process_candles_in_background(request: CandlesSyncRequest):
         # 💡 تشغيل خوارزمية الحدود الذكية (Smart Limits)
         # ==========================================
         for (symbol, timeframe), c in latest_candles.items():
-            # فلترة الشموع لتطابق الرمز والإطار الزمني
-            symbol_candles = [candle for candle in request.candles if candle.symbol == symbol and candle.timeframe == timeframe]
+            symbol_candles = [candle for candle in request.candles if candle.symbol == symbol]
             
             support = None
             resistance = None
@@ -134,7 +137,6 @@ def process_candles_in_background(request: CandlesSyncRequest):
                 support = min(recent_lows)       # قاع السوق المحتمل
                 resistance = max(recent_highs)   # قمة السوق المحتملة
 
-            # 🔥 التعديل الثاني: إضافة الإطار الزمني لتفهمه الاستراتيجية
             market_data = {
                 "symbol": symbol,
                 "timeframe": timeframe,
@@ -146,7 +148,6 @@ def process_candles_in_background(request: CandlesSyncRequest):
                 "resistance": resistance
             }
             try:
-                # استدعاء استراتيجية الحدود الذكية 
                 result = evaluate_and_execute_strategy(db, "smart_limits", market_data)
                 logger.info(f"⚙️ نتيجة التحليل الذكي لـ {symbol} ({timeframe}): {result}")
             except Exception as strat_error:
@@ -196,7 +197,6 @@ async def get_pending_commands(ea_id: str = None, limit: int = 10):
 
         commands_list = []
         for row in result:
-            # 🔥 التعديل الثالث: توحيد المفاتيح لدعم Pydantic (تطبيق فلاتر) والميتاتريدر معاً بدون فقدان أسعار
             commands_list.append({
                 "id": str(row.id),
                 "command_id": str(row.id),
