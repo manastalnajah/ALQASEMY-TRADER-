@@ -1,3 +1,4 @@
+import uuid  # 👈 استيراد مكتبة UUID للتعامل مع المعرفات بشكل صحيح
 from sqlalchemy.orm import Session
 from app.domain.models import TradeCommand
 from app.domain.schemas import CommandCreate
@@ -19,10 +20,12 @@ class TradeRepository(ITradeRepository):
             symbol=command.symbol,
             order_type=command.order_type,
             lot_size=command.lot_size,
-            # استخراج الحقول مع قيم افتراضية آمنة
-            entry_price=getattr(command, 'entry_price', 0.0),
-            stop_loss=getattr(command, 'stop_loss', 0.0),
-            take_profit=getattr(command, 'take_profit', 0.0),
+            
+            # 🔥 تصحيح حاسم: منع تخزين None إذا تم تمريرها بالخطأ من الـ Schema
+            entry_price=getattr(command, 'entry_price', 0.0) or 0.0,
+            stop_loss=getattr(command, 'stop_loss', 0.0) or 0.0,
+            take_profit=getattr(command, 'take_profit', 0.0) or 0.0,
+            
             status="pending" 
         )
         self.db.add(db_command)
@@ -34,7 +37,15 @@ class TradeRepository(ITradeRepository):
         return self.db.query(TradeCommand).filter(TradeCommand.status == "pending").all()
 
     def update_command_status(self, command_id: str, new_status: str) -> TradeCommand:
-        db_command = self.db.query(TradeCommand).filter(TradeCommand.id == command_id).first()
+        # 🔥 تصحيح حاسم: تحويل النص إلى كائن UUID لمنع خطأ (uuid = character varying)
+        try:
+            valid_uuid = uuid.UUID(command_id)
+        except ValueError:
+            # إذا كان المعرف غير صالح كـ UUID، نتجاهل العملية
+            return None
+
+        # استخدام valid_uuid بدلاً من command_id النصي
+        db_command = self.db.query(TradeCommand).filter(TradeCommand.id == valid_uuid).first()
         
         if db_command:
             db_command.status = new_status
