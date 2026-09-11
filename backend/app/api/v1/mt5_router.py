@@ -44,6 +44,8 @@ class CandlesSyncRequest(BaseModel):
 def process_candles_in_background(request: CandlesSyncRequest):
     start_time = time.time()
     values = []
+    
+    # 🔥 التعديل الأول: تجميع الشموع بناءً على الرمز والإطار الزمني معاً لمنع التداخل
     latest_candles = {}
 
     for c in request.candles:
@@ -57,7 +59,7 @@ def process_candles_in_background(request: CandlesSyncRequest):
             "close": c.close,
             "volume": c.volume
         })
-        latest_candles[c.symbol] = c
+        latest_candles[(c.symbol, c.timeframe)] = c
 
     insert_candles_query = text("""
         INSERT INTO candles 
@@ -79,7 +81,7 @@ def process_candles_in_background(request: CandlesSyncRequest):
         db.execute(insert_candles_query, values)
 
         # 2. تحديث بيانات السوق (market_data)
-        for symbol, c in latest_candles.items():
+        for (symbol, timeframe), c in latest_candles.items():
             change = c.close - c.open
             change_percent = (change / c.open * 100) if c.open > 0 else 0.0
 
@@ -117,8 +119,9 @@ def process_candles_in_background(request: CandlesSyncRequest):
         # ==========================================
         # 💡 تشغيل خوارزمية الحدود الذكية (Smart Limits)
         # ==========================================
-        for symbol, c in latest_candles.items():
-            symbol_candles = [candle for candle in request.candles if candle.symbol == symbol]
+        for (symbol, timeframe), c in latest_candles.items():
+            # فلترة الشموع لتطابق الرمز والإطار الزمني
+            symbol_candles = [candle for candle in request.candles if candle.symbol == symbol and candle.timeframe == timeframe]
             
             support = None
             resistance = None
@@ -131,8 +134,10 @@ def process_candles_in_background(request: CandlesSyncRequest):
                 support = min(recent_lows)       # قاع السوق المحتمل
                 resistance = max(recent_highs)   # قمة السوق المحتملة
 
+            # 🔥 التعديل الثاني: إضافة الإطار الزمني لتفهمه الاستراتيجية
             market_data = {
                 "symbol": symbol,
+                "timeframe": timeframe,
                 "close": c.close,
                 "high": c.high,
                 "low": c.low,
@@ -141,9 +146,9 @@ def process_candles_in_background(request: CandlesSyncRequest):
                 "resistance": resistance
             }
             try:
-                # استدعاء استراتيجية الحدود الذكية بالاسم الجديد
+                # استدعاء استراتيجية الحدود الذكية 
                 result = evaluate_and_execute_strategy(db, "smart_limits", market_data)
-                logger.info(f"⚙️ نتيجة التحليل الذكي لـ {symbol}: {result}")
+                logger.info(f"⚙️ نتيجة التحليل الذكي لـ {symbol} ({timeframe}): {result}")
             except Exception as strat_error:
                 logger.error(f"❌ خطأ أثناء التحليل الذكي لـ {symbol}: {strat_error}")
 
@@ -180,7 +185,6 @@ async def sync_candles(request: CandlesSyncRequest, background_tasks: Background
 async def get_pending_commands(ea_id: str = None, limit: int = 10):
     db = SessionLocal()
     try:
-        # تأكد أن جدول trade_commands يحتوي على حقل entry_price للأوامر المعلقة
         query = text("""
             SELECT id, symbol, order_type, lot_size, stop_loss, take_profit, entry_price 
             FROM trade_commands 
@@ -192,12 +196,18 @@ async def get_pending_commands(ea_id: str = None, limit: int = 10):
 
         commands_list = []
         for row in result:
+            # 🔥 التعديل الثالث: توحيد المفاتيح لدعم Pydantic (تطبيق فلاتر) والميتاتريدر معاً بدون فقدان أسعار
             commands_list.append({
+                "id": str(row.id),
                 "command_id": str(row.id),
                 "symbol": row.symbol,
+                "order_type": str(row.order_type).upper(),
                 "side": str(row.order_type).upper(),
+                "lot_size": float(row.lot_size),
                 "volume": float(row.lot_size),
                 "entry_price": float(row.entry_price) if hasattr(row, 'entry_price') and row.entry_price else 0.0,
+                "stop_loss": float(row.stop_loss) if row.stop_loss else 0.0,
+                "take_profit": float(row.take_profit) if row.take_profit else 0.0,
                 "sl": float(row.stop_loss) if row.stop_loss else 0.0,
                 "tp": float(row.take_profit) if row.take_profit else 0.0
             })
@@ -251,14 +261,12 @@ async def receive_mt5_updates(request: Request):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 # ==========================================
 # 3. مسار المواصفات (Specs Sync)
 # ==========================================
 @router.post("/specs/sync")
 async def sync_specs(request: Request):
     return {"status": "success", "message": "Symbol specifications synced"}
-
 
 # ==========================================
 # 4. مسار مزامنة الحساب (Account Sync)
@@ -320,7 +328,6 @@ async def sync_account(request: Request):
         }
     finally:
         db.close()
-
 
 # ==========================================
 # 5. مسار نبض الاتصال (Heartbeat)
