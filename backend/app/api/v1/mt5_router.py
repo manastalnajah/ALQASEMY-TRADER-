@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Header
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from sqlalchemy import text
 from database import SessionLocal
 from app.config import config
@@ -10,6 +10,9 @@ from app.config import config
 router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 EA Integration"])
 logger = logging.getLogger("AlqasemyTrader.MT5")
 
+# ===================================================================
+# Pydantic Models (متوافقة بالكامل مع EA v14.0)
+# ===================================================================
 
 class CandleItem(BaseModel):
     symbol: str
@@ -21,12 +24,10 @@ class CandleItem(BaseModel):
     close: float
     volume: int
 
-
 class CandlesSyncRequest(BaseModel):
     candles: List[CandleItem]
     source: str
     ea_id: str
-
 
 class PositionItem(BaseModel):
     ticket: str
@@ -37,13 +38,17 @@ class PositionItem(BaseModel):
     stop_loss: float = 0.0
     take_profit: float = 0.0
     profit: float = 0.0
-
+    swap: float = 0.0
+    commission: float = 0.0
+    magic: int = 0
+    opened_at: Optional[str] = None
+    comment: Optional[str] = None
 
 class PositionsSyncRequest(BaseModel):
     account_number: int
     ea_id: str
+    magic: Optional[int] = None
     positions: List[PositionItem] = []
-
 
 class PendingOrderItem(BaseModel):
     ticket: str
@@ -53,13 +58,14 @@ class PendingOrderItem(BaseModel):
     price_open: float = Field(gt=0)
     stop_loss: float = 0.0
     take_profit: float = 0.0
-
+    setup_time: Optional[str] = None
+    comment: Optional[str] = None
 
 class PendingOrdersSyncRequest(BaseModel):
     account_number: int
     ea_id: str
+    magic: Optional[int] = None
     orders: List[PendingOrderItem] = []
-
 
 class AccountHeartbeat(BaseModel):
     account_number: int
@@ -70,7 +76,8 @@ class AccountHeartbeat(BaseModel):
     profit: float
     is_connected: bool
     margin_level: float | None = None
-
+    ea_id: Optional[str] = None
+    magic: Optional[int] = None
 
 class SymbolSpecSync(BaseModel):
     symbol: str
@@ -83,7 +90,16 @@ class SymbolSpecSync(BaseModel):
     volume_step: float
     stops_level_points: int = 0
     contract_size: float = 0.0
+    tick_value_profit: float = 0.0
+    tick_value_loss: float = 0.0
+    volume_limit: float = 0.0
+    freeze_level_points: int = 0
+    filling_mode: int = 0
+    trade_mode: int = 0
 
+# ===================================================================
+# Core Validation & Auth
+# ===================================================================
 
 def _authorize(x_mt5_key: str | None):
     if config.require_mt5_api_key:
@@ -92,14 +108,12 @@ def _authorize(x_mt5_key: str | None):
         if x_mt5_key != config.mt5_api_key:
             raise HTTPException(401, "Invalid MT5 API key")
 
-
 _ALLOWED_TIMEFRAMES = {
     config.direction_timeframe,
     config.confirmation_timeframe,
     config.entry_timeframe,
 }
 _ALLOWED_SYMBOLS = set(config.symbols)
-
 
 def _validate_candle(c: CandleItem) -> tuple[str, str]:
     symbol = c.symbol.upper().strip()
@@ -120,11 +134,7 @@ def _validate_candle(c: CandleItem) -> tuple[str, str]:
         raise HTTPException(400, "Invalid candle open_time") from exc
     if parsed.tzinfo is not None:
         parsed = parsed.replace(tzinfo=None)
-    # MQL5 sends broker-server wall-clock time without an offset. The backend
-    # preserves that value as the canonical candle identity; it does not try
-    # to compare it to the backend server's timezone.
     return symbol, timeframe
-
 
 def _retention_for(timeframe: str) -> int:
     if timeframe == config.direction_timeframe:
@@ -133,20 +143,21 @@ def _retention_for(timeframe: str) -> int:
         return config.confirmation_candle_retention
     return config.entry_candle_retention
 
-
 def _prune_candles(db, symbol: str, timeframe: str) -> None:
     retention = max(1, _retention_for(timeframe))
     db.execute(text("""
         DELETE FROM candles
         WHERE id IN (
-            SELECT id
-            FROM candles
+            SELECT id FROM candles
             WHERE symbol_name=:symbol AND timeframe=:tf
             ORDER BY open_time DESC
             OFFSET :retention
         )
     """), {"symbol": symbol, "tf": timeframe, "retention": retention})
 
+# ===================================================================
+# Endpoints
+# ===================================================================
 
 @router.post("/candles/sync")
 async def sync_candles(request: CandlesSyncRequest, x_mt5_key: str | None = Header(default=None)):
@@ -174,7 +185,6 @@ async def sync_candles(request: CandlesSyncRequest, x_mt5_key: str | None = Head
             inserted += int(result.rowcount or 0)
             touched.add((symbol, tf))
 
-        # Keep a bounded history while preserving enough data for MTF recovery.
         for symbol, tf in touched:
             _prune_candles(db, symbol, tf)
 
@@ -213,6 +223,7 @@ async def candle_sync_status(symbol: str, timeframe: str, x_mt5_key: str | None 
             FROM candles
             WHERE symbol_name=:symbol AND timeframe=:tf
         """), {"symbol": symbol, "tf": timeframe}).mappings().first()
+        
         last_open_time = row["last_open_time"] if row else None
         count = int(row["candle_count"] or 0) if row else 0
         return {
@@ -236,7 +247,6 @@ async def get_pending_commands(ea_id: str | None = None, limit: int = 10, x_mt5_
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
-        # The caller receives only unclaimed commands. Claim is atomic in /ack.
         rows = db.execute(text("""
             SELECT id,symbol,order_type,lot_size,entry_price,stop_loss,take_profit,
                    status,created_at,strategy_name,signal_key,ea_id,EXTRACT(EPOCH FROM created_at) AS created_epoch
@@ -246,6 +256,7 @@ async def get_pending_commands(ea_id: str | None = None, limit: int = 10, x_mt5_
             ORDER BY created_at ASC
             LIMIT :limit
         """), {"ea_id": ea_id, "limit": min(max(limit, 1), 20)}).mappings().all()
+        
         return [dict(r, id=str(r["id"]), command_id=str(r["id"]), order_type=r["order_type"].upper(),
                      side=r["order_type"].upper(), volume=float(r["lot_size"]), sl=float(r["stop_loss"]),
                      tp=float(r["take_profit"])) for r in rows]
@@ -263,6 +274,7 @@ async def ack_command(command_id: str, ea_id: str | None = None, x_mt5_key: str 
             WHERE id=:id AND status='pending'
             RETURNING id
         """), {"id": command_id, "ea_id": ea_id or ""}).first()
+        
         if not result:
             db.rollback()
             raise HTTPException(409, "Command is already claimed or does not exist")
@@ -283,16 +295,39 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
     _authorize(x_mt5_key)
     data = await request.json()
     status_val = str(data.get("status", "failed")).lower()
-    allowed = {"executed", "failed", "cancelled", "expired", "ignored"}
+    
+    # دعم الحالات الجديدة القادمة من الإكسبرت
+    allowed = {"executed", "partial", "placed", "failed", "cancelled", "expired", "ignored"}
     if status_val not in allowed:
-        raise HTTPException(400, "Invalid command final status")
+        raise HTTPException(400, f"Invalid command final status: {status_val}")
+        
+    order_ticket = data.get("mt5_order_ticket", 0)
+    deal_ticket = data.get("mt5_deal_ticket", 0)
+    fill_price = data.get("fill_price", 0.0)
+    error_msg = str(data.get("message", data.get("error_message", "")))[:500]
+
     db = SessionLocal()
     try:
         result = db.execute(text("""
-            UPDATE trade_commands SET status=:status, error_message=:error, updated_at=NOW()
+            UPDATE trade_commands 
+            SET status=:status, 
+                error_message=:error,
+                mt5_order_ticket=:order_ticket,
+                mt5_deal_ticket=:deal_ticket,
+                fill_price=:fill_price,
+                mt5_ticket=COALESCE(mt5_ticket, NULLIF(:order_ticket, 0)),
+                updated_at=NOW()
             WHERE id=:id AND status='processing'
             RETURNING id
-        """), {"id": command_id, "status": status_val, "error": str(data.get("message", data.get("error_message", "")))[:500]}).first()
+        """), {
+            "id": command_id, 
+            "status": status_val, 
+            "error": error_msg,
+            "order_ticket": order_ticket,
+            "deal_ticket": deal_ticket,
+            "fill_price": fill_price
+        }).first()
+        
         if not result:
             raise HTTPException(409, "Command is not in processing state")
         db.commit()
@@ -344,25 +379,30 @@ async def sync_account(request: Request, x_mt5_key: str | None = Header(default=
     login = account_data.get("login")
     if login is None:
         raise HTTPException(400, "account.login is required")
+        
     balance = float(account_data.get("balance", 0))
     equity = float(account_data.get("equity", 0))
     margin = float(account_data.get("margin", 0))
     free_margin = float(account_data.get("free_margin", 0))
     profit = float(account_data.get("profit", equity - balance))
     margin_level = float(account_data.get("margin_level", (equity / margin * 100 if margin > 0 else 0)))
+    server = account_data.get("server", "unknown")
+    
     db = SessionLocal()
     try:
         result = db.execute(text("""
             UPDATE trading_accounts SET balance=:balance,equity=:equity,margin=:margin,free_margin=:free_margin,
               profit=:profit,margin_level=:margin_level,is_connected=true,last_sync=NOW(),last_heartbeat=NOW()
-            WHERE account_number=:account
+            WHERE account_number=:account AND server=:server
         """), {"balance": balance, "equity": equity, "margin": margin, "free_margin": free_margin,
-               "profit": profit, "margin_level": margin_level, "account": login})
+               "profit": profit, "margin_level": margin_level, "account": login, "server": server})
+               
         if result.rowcount == 0:
             db.execute(text("""
-                INSERT INTO trading_accounts(account_number,balance,equity,margin,free_margin,profit,margin_level,is_connected,last_sync,last_heartbeat)
-                VALUES(:account,:balance,:equity,:margin,:free_margin,:profit,:margin_level,true,NOW(),NOW())
-            """), {"account": login, "balance": balance, "equity": equity, "margin": margin,
+                INSERT INTO trading_accounts(account_number,server,balance,equity,margin,free_margin,profit,margin_level,is_connected,last_sync,last_heartbeat)
+                VALUES(:account,:server,:balance,:equity,:margin,:free_margin,:profit,:margin_level,true,NOW(),NOW())
+                ON CONFLICT(account_number, server) DO NOTHING
+            """), {"account": login, "server": server, "balance": balance, "equity": equity, "margin": margin,
                    "free_margin": free_margin, "profit": profit, "margin_level": margin_level})
         db.commit()
         return {"status": "success", "account_number": login}
@@ -390,6 +430,7 @@ async def sync_positions(payload: PositionsSyncRequest, x_mt5_key: str | None = 
             """), {"ticket": p.ticket, "account": payload.account_number, "symbol": p.symbol.upper(),
                    "side": side, "volume": p.volume, "price": p.price_open, "sl": p.stop_loss,
                    "tp": p.take_profit, "profit": p.profit})
+                   
         db.execute(text("""
             INSERT INTO position_snapshots(account_number,last_sync) VALUES(:account,NOW())
             ON CONFLICT(account_number) DO UPDATE SET last_sync=NOW()
