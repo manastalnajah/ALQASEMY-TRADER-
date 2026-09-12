@@ -1,0 +1,9 @@
+services:
+  alqasemy-trader-backend:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    stop_grace_period: 20s

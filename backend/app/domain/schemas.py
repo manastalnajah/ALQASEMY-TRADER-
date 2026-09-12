@@ -1,29 +1,54 @@
-from pydantic import BaseModel
 from datetime import datetime
+from pydantic import BaseModel, Field, ConfigDict
 
-# 1. القالب الخاص باستقبال البيانات من تطبيق فلاتر أو الاستراتيجية
+
 class CommandCreate(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=32)
     order_type: str
-    lot_size: float
-    # 🔥 إضافة الحقول المفقودة لاستقبال الأسعار
-    entry_price: float = 0.0
-    stop_loss: float = 0.0
-    take_profit: float = 0.0
+    lot_size: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    take_profit: float = Field(gt=0)
+    strategy_name: str = "manual"
+    signal_key: str = ""
+    ea_id: str = ""
 
-# 2. القالب الخاص بإرجاع البيانات (الرد) إلى الميتاتريدر وفلاتر
+
 class CommandResponse(BaseModel):
-    id: str  # 🔥 تم التعديل من int إلى str ليتوافق مع معرفات UUID
+    model_config = ConfigDict(from_attributes=True)
+    id: str
     symbol: str
     order_type: str
     lot_size: float
     status: str
     created_at: datetime
-    # 🔥 إضافة الحقول المفقودة لإرسال الأسعار إلى الإكسبرت
-    entry_price: float = 0.0
-    stop_loss: float = 0.0
-    take_profit: float = 0.0
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    strategy_name: str = ""
+    signal_key: str = ""
+    ea_id: str = ""
 
-    # إعداد ضروري لكي تفهم Pydantic بيانات SQLAlchemy
-    class Config:
-        from_attributes = True
+
+class SymbolSpecSync(BaseModel):
+    symbol: str
+    digits: int
+    point: float
+    tick_size: float
+    tick_value: float
+    volume_min: float
+    volume_max: float
+    volume_step: float
+    stops_level_points: int = 0
+    contract_size: float = 0.0
+
+
+class AccountHeartbeat(BaseModel):
+    account_number: int
+    balance: float
+    equity: float
+    margin: float
+    free_margin: float
+    profit: float
+    is_connected: bool
+    margin_level: float | None = None

@@ -1,48 +1,50 @@
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
-# استدعاء القوالب 
+from app.config import config
 from app.domain import schemas
-# استدعاء الفئة (Class) الخاصة بالمستودع
 from app.repositories.trade_repo import TradeRepository
-# استدعاء المراقب (Logger)
 from app.logging.logger import system_logger
+from app.services.risk_manager import validate_and_size
 
-def process_new_command(db: Session, command: schemas.CommandCreate):
-    """
-    هذه الدالة تمثل 'نقطة التفتيش' وإدارة المخاطر (Risk Management).
-    أي أمر قادم من الاستراتيجيات سيمر من هنا أولاً قبل أن يصل لقاعدة البيانات.
-    """
-    
-    # تسجيل حدث استلام أمر جديد
-    system_logger.info(f"📥 استلام أمر جديد للتدقيق: {command.order_type} {command.symbol} بحجم لوت {command.lot_size}")
-    
-    # 1. شرط الأمان الأول: التحقق من حجم اللوت (Lot Size)
-    if command.lot_size <= 0 or command.lot_size > 50:
-        system_logger.warning(f"⚠️ تم رفض الأمر: حجم اللوت ({command.lot_size}) غير مسموح به!")
-        raise HTTPException(
-            status_code=400, 
-            detail="⚠️ خطأ: حجم اللوت غير مسموح! يجب أن يكون بين 0.01 و 50"
-        )
-        
-    # 2. شرط الأمان الثاني: التحقق من نوع الأمر (تمت إضافة الأوامر المعلقة Limit / Stop)
-    order_type_lower = command.order_type.lower()
-    valid_order_types = ["buy", "sell", "buy_limit", "sell_limit", "buy_stop", "sell_stop"]
-    
-    if order_type_lower not in valid_order_types:
-        system_logger.warning(f"⚠️ تم رفض الأمر: نوع الأمر ({command.order_type}) غير معروف!")
-        raise HTTPException(
-            status_code=400, 
-            detail="⚠️ خطأ: نوع الأمر يجب أن يكون مباشر (buy/sell) أو أمر معلق صحيح (Limit/Stop)"
-        )
-        
-    # 3. توحيد صيغة رمز العملة
+
+VALID_TYPES = {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT"}
+
+
+def process_new_command(db: Session, command: schemas.CommandCreate, *, enforce_risk: bool = True):
     command.symbol = command.symbol.upper()
+    command.order_type = command.order_type.upper()
+    if command.order_type not in VALID_TYPES:
+        raise HTTPException(400, "نوع الأمر غير مسموح")
+    if command.entry_price <= 0 or command.stop_loss <= 0 or command.take_profit <= 0:
+        raise HTTPException(400, "SL وTP وسعر الدخول مطلوبة ولا يجوز أن تكون صفراً")
+    if command.lot_size <= 0:
+        raise HTTPException(400, "حجم اللوت يجب أن يكون أكبر من صفر")
 
-    # تسجيل حدث نجاح الفحص
-    system_logger.info("✅ اجتاز الأمر شروط الأمان بنجاح، جاري الحفظ في قاعدة البيانات...")
+    # Manual/API commands are also protected. The strategy is never allowed to bypass this gate.
+    if enforce_risk:
+        sized, reason = validate_and_size(
+            db,
+            symbol=command.symbol,
+            order_type=command.order_type,
+            entry=command.entry_price,
+            stop=command.stop_loss,
+            target=command.take_profit,
+            signal_key=command.signal_key or f"manual:{command.symbol}:{command.order_type}:{command.entry_price:.10f}",
+        )
+        if not sized:
+            system_logger.warning("🛑 رفض أمر %s %s: %s", command.order_type, command.symbol, reason)
+            raise HTTPException(409, f"Trade blocked by risk engine: {reason}")
+        # The risk engine owns the authoritative lot size. The caller cannot choose a larger or smaller risk budget.
+        command.lot_size = float(sized["lot_size"])
+        if command.lot_size <= 0:
+            raise HTTPException(409, "Trade blocked: calculated risk size is zero")
 
-    # إنشاء نسخة من المستودع وربطها بقاعدة البيانات
     repo = TradeRepository(db)
-    
-    # إرسال الأمر للحفظ في المستودع (مع دعم entry_price, sl, tp)
-    return repo.create_trade_command(command=command)
+    try:
+        command_obj = repo.create_trade_command(command)
+        system_logger.info("✅ Command created: %s %s %.4f", command.symbol, command.order_type, command_obj.lot_size)
+        return command_obj
+    except Exception:
+        db.rollback()
+        raise

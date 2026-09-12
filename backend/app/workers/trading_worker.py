@@ -1,177 +1,163 @@
 import asyncio
-from datetime import datetime, timedelta
 from sqlalchemy import text
-
 from database import SessionLocal
-
+from app.config import config
 from app.indicators.moving_average import calculate_sma
 from app.indicators.rsi import calculate_rsi
-from app.services.strategy_service import evaluate_and_execute_strategy
+from app.indicators.atr import calculate_atr
+from app.services.strategy_evaluator import evaluate_and_execute_strategy
 from app.logging.logger import system_logger
-
-# ⚠️ التعديل الجديد: استدعاء حالة البوت من ملف الـ API الذي قمت بإنشائه
-# (يرجى التأكد من مسار الاستيراد حسب اسم المجلد والملف لديك، مثلاً app.api.bot_control)
-from app.api.v1.bot_router import bot_state
+from app.api.v1.bot_router import is_bot_running
 
 
-# ============================================================
-# ALQASEMY TRADER - SECURE MULTI-STRATEGY WORKER (WITH COOLDOWN)
-# ============================================================
-
-SYMBOLS = ["XAUUSD", "EURUSD"]
-STRATEGIES = ["rsi", "crossover", "scalping"]
-TIMEFRAME = "M5"
-
-CANDLE_LIMIT = 100
-WORKER_INTERVAL_SECONDS = 5
-
-# تخزين وقت آخر صفقة تم إرسالها لكل سوق لمنع التكرار الجنوني
-last_trade_times = {}
-COOLDOWN_MINUTES = 3  # فترة تبريد 3 دقائق بين كل صفقة وأخرى لنفس السوق
+def _load_candles(db, symbol: str, timeframe: str, limit: int):
+    rows = db.execute(text("""
+        SELECT open_time, open, high, low, close, volume
+        FROM candles
+        WHERE symbol_name=:symbol AND timeframe=:timeframe
+        ORDER BY open_time DESC
+        LIMIT :limit
+    """), {"symbol": symbol, "timeframe": timeframe, "limit": limit}).mappings().all()
+    return list(reversed(rows))
 
 
-async def analyze_symbol_with_strategies(db, symbol: str):
-    try:
-        # 1. التحقق من فترة التبريد (Cooldown) لمنع إغراق السوق بصفقات مكررة
-        global last_trade_times
-        if symbol in last_trade_times:
-            elapsed = datetime.utcnow() - last_trade_times[symbol]
-            if elapsed < timedelta(minutes=COOLDOWN_MINUTES):
-                # لا زال السوق في فترة التبريد، نتخطى التحليل مؤقتاً
-                return
-
-        # 2. قراءة آخر الشموع الحقيقية
-        query = text("""
-            SELECT close
-            FROM candles
-            WHERE symbol_name = :symbol
-              AND timeframe = :timeframe
-              AND close IS NOT NULL
-            ORDER BY open_time DESC
-            LIMIT :limit
-        """)
-
-        result = db.execute(
-            query,
-            {
-                "symbol": symbol,
-                "timeframe": TIMEFRAME,
-                "limit": CANDLE_LIMIT,
-            },
-        ).fetchall()
-
-        if len(result) < 50:
-            return
-
-        price_history = [
-            float(row[0])
-            for row in reversed(result)
-            if row[0] is not None
-        ]
-
-        if len(price_history) < 50:
-            return
-
-        current_price = price_history[-1]
-
-        if current_price <= 0:
-            return
-
-        # 3. حساب المؤشرات الفنية
-        fast_ma = calculate_sma(price_history, period=10)
-        slow_ma = calculate_sma(price_history, period=50)
-        rsi_value = calculate_rsi(price_history, period=14)
-
-        if fast_ma is None or slow_ma is None or rsi_value is None:
-            return
-
-        try:
-            fast_ma = float(fast_ma)
-            slow_ma = float(slow_ma)
-            rsi_value = float(rsi_value)
-        except (TypeError, ValueError):
-            return
-
-        market_data = {
-            "symbol": symbol,
-            "timeframe": TIMEFRAME,
-            "price": current_price,
-            "fast_ma": fast_ma,
-            "slow_ma": slow_ma,
-            "rsi": rsi_value,
-        }
-
-        system_logger.info(
-            f"📊 [SECURE M5] "
-            f"{symbol} | "
-            f"Price={current_price} | "
-            f"MA10={fast_ma:.2f} | "
-            f"MA50={slow_ma:.2f} | "
-            f"RSI={rsi_value:.2f}"
-        )
-
-        # 4. فحص الأوامر المعلقة أو قيد المعالجة في قاعدة البيانات
-        check_active = text("""
-            SELECT count(*) FROM trade_commands 
-            WHERE symbol = :symbol AND status IN ('pending', 'processing')
-        """)
-        count_active = db.execute(check_active, {"symbol": symbol}).scalar()
-
-        if count_active > 0:
-            system_logger.info(f"⏳ يوجد أمر سابق قيد التنفيذ لـ {symbol}، جاري الانتظار...")
-            return
-
-        # 5. المرور على الاستراتيجيات وتقييم السوق
-        for strategy_name in STRATEGIES:
-            # تقييم الاستراتيجية
-            # (نكتفي بأول استراتيجية تعطي إشارة صالحة في هذه الدورة لتجنب تضارب الصفقات)
-            result_decision = evaluate_and_execute_strategy(
-                db=db,
-                strategy_name=strategy_name,
-                market_data=market_data,
-            )
-
-            # إذا قامت الاستراتيجية بإصدار أمر حقيقي، نسجل وقت التبريد ونخرج من حلقة الاستراتيجيات
-            if result_decision and result_decision.get("decision") in ["BUY", "SELL"]:
-                last_trade_times[symbol] = datetime.utcnow()
-                break
-
-    except Exception as e:
-        system_logger.error(
-            f"❌ خطأ في تحليل السوق {symbol}: {type(e).__name__}: {e}"
-        )
+def _ma_context(candles, fast_period=10, slow_period=50):
+    closes = [float(r["close"]) for r in candles]
+    if len(closes) < slow_period + 1:
+        return None
+    fast = calculate_sma(closes, fast_period)
+    slow = calculate_sma(closes, slow_period)
+    if fast is None or slow is None:
+        return None
+    return {
+        "fast_ma": float(fast),
+        "slow_ma": float(slow),
+        "close": float(closes[-1]),
+        "bullish": float(fast) > float(slow) and float(closes[-1]) > float(slow),
+        "bearish": float(fast) < float(slow) and float(closes[-1]) < float(slow),
+    }
 
 
-async def run_trading_cycle():
-    # 💡 التعديل الأهم: التحقق من حالة البوت قبل فتح قاعدة البيانات أو إرهاق السيرفر
-    if not bot_state.get("is_running", False):
-        return  # البوت مطفأ من التطبيق، انسحاب هادئ دون فعل أي شيء
+def analyze_symbol(db, symbol: str):
+    # Professional MTF pipeline:
+    # H1 = market direction, M15 = confirmation, M5 = entry signal.
+    direction_candles = _load_candles(db, symbol, config.direction_timeframe, config.direction_candle_limit)
+    confirmation_candles = _load_candles(db, symbol, config.confirmation_timeframe, config.confirmation_candle_limit)
+    entry_candles = _load_candles(db, symbol, config.entry_timeframe, config.entry_candle_limit)
 
+    if (len(direction_candles) < config.min_candles_required or
+            len(confirmation_candles) < config.min_candles_required or
+            len(entry_candles) < config.min_candles_required):
+        return
+
+    direction = _ma_context(direction_candles)
+    confirmation = _ma_context(confirmation_candles)
+    if not direction or not confirmation:
+        return
+
+    # H1 and M15 must agree before M5 is allowed to generate an entry.
+    if direction["bullish"] and confirmation["bullish"]:
+        market_bias = "BUY"
+    elif direction["bearish"] and confirmation["bearish"]:
+        market_bias = "SELL"
+    else:
+        market_bias = "NEUTRAL"
+
+    closes = [float(r["close"]) for r in entry_candles]
+    highs = [float(r["high"]) for r in entry_candles]
+    lows = [float(r["low"]) for r in entry_candles]
+    if any(v <= 0 for v in closes):
+        return
+
+    fast = calculate_sma(closes, 10)
+    slow = calculate_sma(closes, 50)
+    fast_prev = calculate_sma(closes[:-1], 10)
+    slow_prev = calculate_sma(closes[:-1], 50)
+    rsi = calculate_rsi(closes, 14)
+    rsi_prev = calculate_rsi(closes[:-1], 14)
+    atr = calculate_atr(highs, lows, closes, config.atr_period)
+    ma14 = calculate_sma(closes, 14)
+    ma14_prev = calculate_sma(closes[:-1], 14)
+    if None in (fast, slow, fast_prev, slow_prev, rsi, rsi_prev, atr, ma14, ma14_prev):
+        return
+
+    latest = entry_candles[-1]
+    spec = db.execute(text("SELECT point, digits, tick_size, tick_value FROM symbol_specs WHERE symbol=:symbol"), {"symbol": symbol}).mappings().first()
+    if not spec:
+        system_logger.warning("🛑 %s: symbol specification missing; trading blocked", symbol)
+        return
+
+    market = {
+        "symbol": symbol,
+        "timeframe": config.entry_timeframe,
+        "direction_timeframe": config.direction_timeframe,
+        "confirmation_timeframe": config.confirmation_timeframe,
+        "entry_timeframe": config.entry_timeframe,
+        "market_bias": market_bias,
+        "h1_bullish": direction["bullish"] if config.direction_timeframe == "H1" else None,
+        "h1_bearish": direction["bearish"] if config.direction_timeframe == "H1" else None,
+        "higher_tf_bullish": direction["bullish"],
+        "higher_tf_bearish": direction["bearish"],
+        "confirmation_bullish": confirmation["bullish"],
+        "confirmation_bearish": confirmation["bearish"],
+        "direction_close": direction["close"],
+        "confirmation_close": confirmation["close"],
+        "open_time": str(latest["open_time"]),
+        "candle_key": str(latest["open_time"]),
+        "open": float(latest["open"]),
+        "high": float(latest["high"]),
+        "low": float(latest["low"]),
+        "close": float(latest["close"]),
+        "price": float(latest["close"]),
+        "fast_ma": float(fast),
+        "slow_ma": float(slow),
+        "fast_ma_prev": float(fast_prev),
+        "slow_ma_prev": float(slow_prev),
+        "rsi": float(rsi),
+        "rsi_prev": float(rsi_prev),
+        "atr": float(atr),
+        "ma_14": float(ma14),
+        "ma_14_prev": float(ma14_prev),
+        "point": float(spec["point"]),
+    }
+
+    for strategy_name in config.enabled_strategies:
+        result = evaluate_and_execute_strategy(db, strategy_name, market)
+        if result.get("decision") in {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT"}:
+            system_logger.info("🎯 MTF %s H1=%s M15=%s M5=%s -> %s %s", symbol, market_bias, confirmation["bullish"] and "BUY" or confirmation["bearish"] and "SELL" or "NEUTRAL", config.entry_timeframe, strategy_name, result)
+            break
+
+
+def run_cycle_sync():
     db = SessionLocal()
     try:
-        for symbol in SYMBOLS:
-            await analyze_symbol_with_strategies(db, symbol)
+        if not is_bot_running(db):
+            return
+        # One DB advisory lock protects against two API instances running workers simultaneously.
+        acquired = db.execute(text("SELECT pg_try_advisory_lock(hashtext('ALQASEMY:TRADING_WORKER'))")).scalar()
+        if not acquired:
+            return
+        try:
+            for symbol in config.symbols:
+                analyze_symbol(db, symbol)
+            db.commit()
+        finally:
+            db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
+    except Exception as exc:
+        db.rollback()
+        system_logger.exception("Trading cycle failed: %s", exc)
     finally:
         db.close()
 
 
 async def start_background_worker():
-    system_logger.info(
-        "🚀 تشغيل محرك التداول الآمن والمحمى (Secure Multi-Strategy Worker)"
-    )
-    system_logger.info(
-        f"📡 Symbols: {SYMBOLS} | Strategies: {STRATEGIES} | Cooldown: {COOLDOWN_MINUTES}m"
-    )
-
+    system_logger.info("🚀 ALQASEMY hardened trading worker started | symbols=%s | H1=%s | M15=%s | Entry=%s", config.symbols, config.direction_timeframe, config.confirmation_timeframe, config.entry_timeframe)
     while True:
         try:
-            await run_trading_cycle()
+            await asyncio.to_thread(run_cycle_sync)
         except asyncio.CancelledError:
-            system_logger.info("🛑 تم إيقاف Trading Worker.")
+            system_logger.info("🛑 Trading worker stopped")
             raise
-        except Exception as e:
-            system_logger.error(
-                f"❌ خطأ غير متوقع في Trading Worker: {type(e).__name__}: {e}"
-            )
-
-        await asyncio.sleep(WORKER_INTERVAL_SECONDS)
+        except Exception as exc:
+            system_logger.exception("Worker loop failure: %s", exc)
+        await asyncio.sleep(max(1, config.worker_interval_seconds))
