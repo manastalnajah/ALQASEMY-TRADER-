@@ -64,7 +64,10 @@ async def stop_bot(x_control_key: str | None = Header(default=None)):
 
 
 @router.get("/status")
-async def get_bot_status():
+async def get_bot_status(x_control_key: str | None = Header(default=None)):
+    # [تحديث أمني]: حماية مسار فحص الحالة لمنع تسريب إعدادات المخاطر للعامة
+    _authorize_control(x_control_key)
+    
     db = SessionLocal()
     try:
         state = _get_state(db)
