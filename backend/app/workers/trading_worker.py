@@ -9,6 +9,9 @@ from app.services.strategy_evaluator import evaluate_and_execute_strategy
 from app.logging.logger import system_logger
 from app.api.v1.bot_router import is_bot_running
 
+# تم إضافة أوامر الـ STOP لتتطابق مع النظام
+VALID_DECISIONS = {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
+
 
 def _load_candles(db, symbol: str, timeframe: str, limit: int):
     rows = db.execute(text("""
@@ -38,7 +41,12 @@ def _ma_context(candles, fast_period=10, slow_period=50):
     }
 
 
-def analyze_symbol(db, symbol: str):
+def analyze_symbol(db, symbol: str, active_accounts: list):
+    """
+    التعديل: تمرير قائمة الحسابات النشطة.
+    يتم تقييم السوق (الشموع والمؤشرات) مرة واحدة توفيراً للموارد، 
+    ثم يتم إرسال الإشارة لكل حساب ليتم تسعيرها بحجم اللوت الخاص به.
+    """
     # Professional MTF pipeline:
     # H1 = market direction, M15 = confirmation, M5 = entry signal.
     direction_candles = _load_candles(db, symbol, config.direction_timeframe, config.direction_candle_limit)
@@ -121,11 +129,23 @@ def analyze_symbol(db, symbol: str):
         "point": float(spec["point"]),
     }
 
-    for strategy_name in config.enabled_strategies:
-        result = evaluate_and_execute_strategy(db, strategy_name, market)
-        if result.get("decision") in {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT"}:
-            system_logger.info("🎯 MTF %s H1=%s M15=%s M5=%s -> %s %s", symbol, market_bias, confirmation["bullish"] and "BUY" or confirmation["bearish"] and "SELL" or "NEUTRAL", config.entry_timeframe, strategy_name, result)
-            break
+    # تطبيق الإستراتيجيات لكل حساب نشط
+    for account in active_accounts:
+        market_for_account = market.copy()
+        # حقن معرف الـ EA الخاص بالحساب
+        market_for_account["ea_id"] = str(account["ea_id"] or "")
+        account_id = str(account["id"])
+        
+        for strategy_name in config.enabled_strategies:
+            # تمرير account_id بشكل إلزامي
+            result = evaluate_and_execute_strategy(db, account_id, strategy_name, market_for_account)
+            
+            if result.get("decision") in VALID_DECISIONS:
+                system_logger.info("🎯 Account %s | MTF %s H1=%s M15=%s M5=%s -> %s %s", 
+                                   account["account_number"], symbol, market_bias, 
+                                   confirmation["bullish"] and "BUY" or confirmation["bearish"] and "SELL" or "NEUTRAL", 
+                                   config.entry_timeframe, strategy_name, result)
+                break  # إذا نجحت استراتيجية، ننتقل للرمز/الحساب التالي ولا نُكمل باقي الاستراتيجيات لنفس الرمز
 
 
 def run_cycle_sync():
@@ -133,16 +153,30 @@ def run_cycle_sync():
     try:
         if not is_bot_running(db):
             return
+        
         # One DB advisory lock protects against two API instances running workers simultaneously.
         acquired = db.execute(text("SELECT pg_try_advisory_lock(hashtext('ALQASEMY:TRADING_WORKER'))")).scalar()
         if not acquired:
             return
+            
         try:
+            # جلب الحسابات النشطة والمتصلة حالياً
+            active_accounts = db.execute(text("""
+                SELECT id, account_number, ea_id 
+                FROM trading_accounts 
+                WHERE is_connected = true
+            """)).mappings().all()
+            
+            if not active_accounts:
+                return  # لا يوجد حسابات نشطة، لا داعي لإرهاق السيرفر بتحليل الشموع
+                
             for symbol in config.symbols:
-                analyze_symbol(db, symbol)
+                analyze_symbol(db, symbol, active_accounts)
+                
             db.commit()
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
+            
     except Exception as exc:
         db.rollback()
         system_logger.exception("Trading cycle failed: %s", exc)
@@ -151,7 +185,8 @@ def run_cycle_sync():
 
 
 async def start_background_worker():
-    system_logger.info("🚀 ALQASEMY hardened trading worker started | symbols=%s | H1=%s | M15=%s | Entry=%s", config.symbols, config.direction_timeframe, config.confirmation_timeframe, config.entry_timeframe)
+    system_logger.info("🚀 ALQASEMY hardened trading worker started | symbols=%s | H1=%s | M15=%s | Entry=%s", 
+                       config.symbols, config.direction_timeframe, config.confirmation_timeframe, config.entry_timeframe)
     while True:
         try:
             await asyncio.to_thread(run_cycle_sync)
@@ -160,4 +195,5 @@ async def start_background_worker():
             raise
         except Exception as exc:
             system_logger.exception("Worker loop failure: %s", exc)
+            
         await asyncio.sleep(max(1, config.worker_interval_seconds))
