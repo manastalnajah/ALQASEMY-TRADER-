@@ -12,6 +12,7 @@ class TradeRepository(ITradeRepository):
 
     def create_trade_command(self, command: CommandCreate) -> TradeCommand:
         db_command = TradeCommand(
+            account_id=command.account_id,  # [تحديث حرج]: ربط الأمر بالحساب لحل مشكلة قيد الـ Idempotency
             symbol=command.symbol.upper(),
             order_type=command.order_type.upper(),
             lot_size=command.lot_size,
@@ -39,11 +40,14 @@ class TradeRepository(ITradeRepository):
             valid_uuid = uuid.UUID(command_id)
         except ValueError:
             return None
+            
         command = (self.db.query(TradeCommand)
                    .filter(TradeCommand.id == valid_uuid, TradeCommand.status == "pending")
                    .with_for_update(skip_locked=True).first())
+                   
         if not command:
             return None
+            
         command.status = "processing"
         self.db.commit()
         self.db.refresh(command)
@@ -54,13 +58,18 @@ class TradeRepository(ITradeRepository):
             valid_uuid = uuid.UUID(command_id)
         except ValueError:
             return None
-        allowed = {"pending", "processing", "executed", "failed", "cancelled", "expired"}
+            
+        # [تحديث]: إضافة الحالات الجديدة (ignored, placed, partial, rejected) لتطابق EA v14.0
+        allowed = {"pending", "processing", "executed", "partial", "placed", "failed", "cancelled", "expired", "ignored", "rejected"}
         status = new_status.lower()
+        
         if status not in allowed:
             return None
+            
         command = self.db.query(TradeCommand).filter(TradeCommand.id == valid_uuid).first()
         if command:
             command.status = status
             self.db.commit()
             self.db.refresh(command)
+            
         return command
