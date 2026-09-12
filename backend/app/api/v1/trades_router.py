@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, Header
+from fastapi import APIRouter, Depends, HTTPException, Body, Header, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from app.domain import schemas
@@ -17,20 +17,34 @@ def _authorize_control(x_control_key: str | None):
             raise HTTPException(401, "Invalid control API key")
 
 
-
 @router.post("/commands", response_model=schemas.CommandResponse)
-def create_command(command: schemas.CommandCreate, db: Session = Depends(get_db), x_control_key: str | None = Header(default=None)):
+def create_command(
+    command: schemas.CommandCreate, 
+    account_id: str = Query(..., description="المعرف الفريد للحساب المراد تنفيذ الأمر عليه"),
+    db: Session = Depends(get_db), 
+    x_control_key: str | None = Header(default=None)
+):
     _authorize_control(x_control_key)
-    return trade_service.process_new_command(db, command, enforce_risk=True)
+    # تمرير account_id الإلزامي لربط الأمر بالحساب الصحيح وإدارة المخاطر
+    return trade_service.process_new_command(db=db, command=command, account_id=account_id, enforce_risk=True)
 
 
 @router.get("/commands/pending", response_model=list[schemas.CommandResponse])
-def get_pending_commands(db: Session = Depends(get_db)):
+def get_pending_commands(
+    db: Session = Depends(get_db), 
+    x_control_key: str | None = Header(default=None)
+):
+    _authorize_control(x_control_key) # تأمين المسار
     return TradeRepository(db).get_pending_commands()
 
 
 @router.put("/commands/{command_id}/claim", response_model=schemas.CommandResponse)
-def claim_command(command_id: str, db: Session = Depends(get_db)):
+def claim_command(
+    command_id: str, 
+    db: Session = Depends(get_db), 
+    x_control_key: str | None = Header(default=None)
+):
+    _authorize_control(x_control_key) # تأمين المسار
     command = TradeRepository(db).claim_command(command_id)
     if not command:
         raise HTTPException(409, "Command is already claimed or does not exist")
@@ -38,7 +52,13 @@ def claim_command(command_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/commands/{command_id}/status", response_model=schemas.CommandResponse)
-def update_command_status(command_id: str, status: str = Body(..., embed=True), db: Session = Depends(get_db)):
+def update_command_status(
+    command_id: str, 
+    status: str = Body(..., embed=True), 
+    db: Session = Depends(get_db), 
+    x_control_key: str | None = Header(default=None)
+):
+    _authorize_control(x_control_key) # تأمين المسار
     command = TradeRepository(db).update_command_status(command_id, status)
     if not command:
         raise HTTPException(404, "Command not found or invalid status")
