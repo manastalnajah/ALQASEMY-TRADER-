@@ -21,6 +21,8 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
     if atr <= 0:
         return 0.0, 0.0
     risk_distance = atr * config.atr_sl_multiplier
+    
+    # .startswith يغطي (BUY, BUY_LIMIT, BUY_STOP) و (SELL, SELL_LIMIT, SELL_STOP)
     if decision.startswith("BUY"):
         return entry - risk_distance, entry + (risk_distance * config.reward_risk)
     if decision.startswith("SELL"):
@@ -28,10 +30,15 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
     return 0.0, 0.0
 
 
-def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: dict):
+def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: str, market_data: dict):
+    """
+    تحديث مهم: تم إضافة `account_id` كمعامل إلزامي لتوجيه الإشارة للحساب الصحيح 
+    في بيئة تدعم حسابات متعددة.
+    """
     symbol = str(market_data.get("symbol") or "").upper()
     timeframe = str(market_data.get("timeframe") or config.timeframe).upper()
     candle_key = str(market_data.get("candle_key") or market_data.get("open_time") or "")
+    
     if not symbol or not candle_key:
         return {"status": "ignored", "decision": "HOLD", "message": "Missing symbol/candle identity"}
 
@@ -56,6 +63,7 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     current = _price(market_data)
     if entry <= 0:
         entry = current
+    
     sl, tp = _build_protection(market_data, decision, entry, sl, tp)
     if sl <= 0 or tp <= 0:
         system_logger.warning("🛑 %s %s rejected: no valid SL/TP", strategy_name, symbol)
@@ -67,7 +75,9 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
     if decision.startswith("SELL") and not (tp < entry < sl):
         return {"status": "blocked", "decision": "HOLD", "message": "Invalid SELL protection geometry"}
 
-    signal_key = f"{symbol}:{timeframe}:{strategy_name}:{candle_key}:{decision}"
+    # التنسيق القياسي المعتمد لمفتاح الإشارة لمنع التكرار المطلق (Idempotency)
+    signal_key = f"{symbol}|{strategy_name}|{timeframe}|{candle_key}|{decision}"
+    
     command = schemas.CommandCreate(
         symbol=symbol,
         order_type=decision,
@@ -80,10 +90,17 @@ def evaluate_and_execute_strategy(db: Session, strategy_name: str, market_data: 
         signal_key=signal_key,
         ea_id=str(market_data.get("ea_id") or ""),
     )
+    
     try:
-        created = trade_service.process_new_command(db, command, enforce_risk=True)
+        # تمرير account_id إلزامي لدالة process_new_command كما عدلناها سابقاً
+        created = trade_service.process_new_command(
+            db=db, 
+            command=command, 
+            account_id=account_id, 
+            enforce_risk=True
+        )
     except Exception as exc:
-        system_logger.warning("🛑 %s %s blocked: %s", strategy_name, symbol, exc)
+        system_logger.warning("🛑 %s %s blocked for account %s: %s", strategy_name, symbol, account_id, exc)
         return {"status": "blocked", "decision": "HOLD", "message": str(exc)}
 
     return {
