@@ -2,6 +2,7 @@ import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
+from app.logging.logger import system_logger
 
 load_dotenv(override=True)
 DATABASE_URL = os.getenv("SUPABASE_DB_URL")
@@ -20,20 +21,22 @@ Base = declarative_base()
 
 
 def initialize_database():
-    # Required for UUID defaults used by the existing Supabase schema.
-    with engine.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-        from app.domain import models  # noqa: F401
-        Base.metadata.create_all(bind=conn)
-        # Backward-compatible hardening for an already-created trade_commands table.
-        conn.execute(text("ALTER TABLE trade_commands ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP"))
-        conn.execute(text("ALTER TABLE trade_commands ADD COLUMN IF NOT EXISTS strategy_name VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE trade_commands ADD COLUMN IF NOT EXISTS signal_key VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE trade_commands ADD COLUMN IF NOT EXISTS ea_id VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE trade_commands ADD COLUMN IF NOT EXISTS error_message VARCHAR DEFAULT ''"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_commands_signal_key ON trade_commands(signal_key)"))
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_trade_commands_symbol_status_created ON trade_commands(symbol,status,created_at)"))
+    try:
+        with engine.begin() as conn:
+            # تهيئة الإضافات الأساسية لعمل UUIDs والتشفير في PostgreSQL
+            conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
+            conn.execute(text('CREATE EXTENSION IF NOT EXISTS pgcrypto'))
+            
+            # استدعاء النماذج لضمان تسجيلها
+            from app.domain import models  # noqa: F401
+            
+            # إنشاء الجداول غير الموجودة فقط (لن يعبث بالقيود التي أضفناها في الـ Migration)
+            Base.metadata.create_all(bind=conn)
+            
+            system_logger.info("Database initialized successfully.")
+    except Exception as e:
+        system_logger.error(f"Database initialization failed: {e}")
+        raise
 
 
 def get_db():
