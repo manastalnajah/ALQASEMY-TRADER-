@@ -241,7 +241,6 @@ async def candle_sync_status(symbol: str, timeframe: str, x_mt5_key: str | None 
     finally:
         db.close()
 
-
 @router.get("/commands")
 async def get_pending_commands(ea_id: str | None = None, limit: int = 10, x_mt5_key: str | None = Header(default=None)):
     _authorize(x_mt5_key)
@@ -252,7 +251,7 @@ async def get_pending_commands(ea_id: str | None = None, limit: int = 10, x_mt5_
                    status,created_at,strategy_name,signal_key,ea_id,EXTRACT(EPOCH FROM created_at) AS created_epoch
             FROM trade_commands
             WHERE status='pending'
-              AND (:ea_id IS NULL OR ea_id='' OR ea_id=:ea_id)
+              AND (CAST(:ea_id AS TEXT) IS NULL OR ea_id='' OR ea_id=CAST(:ea_id AS TEXT))
             ORDER BY created_at ASC
             LIMIT :limit
         """), {"ea_id": ea_id, "limit": min(max(limit, 1), 20)}).mappings().all()
@@ -396,7 +395,7 @@ async def sync_account(request: Request, x_mt5_key: str | None = Header(default=
             WHERE account_number=:account AND server=:server
         """), {"balance": balance, "equity": equity, "margin": margin, "free_margin": free_margin,
                "profit": profit, "margin_level": margin_level, "account": login, "server": server})
-               
+                
         if result.rowcount == 0:
             db.execute(text("""
                 INSERT INTO trading_accounts(account_number,server,balance,equity,margin,free_margin,profit,margin_level,is_connected,last_sync,last_heartbeat)
