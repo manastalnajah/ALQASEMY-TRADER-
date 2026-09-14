@@ -9,7 +9,7 @@ from app.config import config
 
 # استيراد محرك التداول (العقل المدبر) لتشغيله في الخلفية
 # (تأكد من تعديل المسار 'app.YOUR_PATH' للمكان الفعلي لملف strategy_executor)
-from app.services.strategy_executor import evaluate_and_execute_strategy
+from app.services.strategy_evaluator import evaluate_and_execute_strategy
 router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 EA Integration"])
 logger = logging.getLogger("AlqasemyTrader.MT5")
 
