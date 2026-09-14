@@ -25,47 +25,43 @@ class CandleItem(BaseModel):
     volume: int
 
 class CandlesSyncRequest(BaseModel):
-    candles: List[CandleItem]
-    source: str
-    ea_id: str
+    symbol: str
+    timeframe: str
+    candles: List[CandleItem] = Field(default_factory=list)
+    ea_id: Optional[str] = None
 
 class PositionItem(BaseModel):
-    ticket: str
+    ticket: int
     symbol: str
     side: str
     volume: float = Field(gt=0)
     price_open: float = Field(gt=0)
-    stop_loss: float = 0.0
-    take_profit: float = 0.0
-    profit: float = 0.0
-    swap: float = 0.0
-    commission: float = 0.0
-    magic: int = 0
-    opened_at: Optional[str] = None
-    comment: Optional[str] = None
+    stop_loss: float = Field(ge=0)
+    take_profit: float = Field(ge=0)
+    profit: float
+    updated_at: Optional[str] = None
 
 class PositionsSyncRequest(BaseModel):
     account_number: int
-    ea_id: str
+    ea_id: str = ""
     magic: Optional[int] = None
-    positions: List[PositionItem] = []
+    positions: List[PositionItem] = Field(default_factory=list)
 
 class PendingOrderItem(BaseModel):
-    ticket: str
+    ticket: int
     symbol: str
     side: str
     volume: float = Field(gt=0)
     price_open: float = Field(gt=0)
-    stop_loss: float = 0.0
-    take_profit: float = 0.0
-    setup_time: Optional[str] = None
-    comment: Optional[str] = None
+    stop_loss: float = Field(ge=0)
+    take_profit: float = Field(ge=0)
+    updated_at: Optional[str] = None
 
 class PendingOrdersSyncRequest(BaseModel):
     account_number: int
-    ea_id: str
+    ea_id: str = ""
     magic: Optional[int] = None
-    orders: List[PendingOrderItem] = []
+    orders: List[PendingOrderItem] = Field(default_factory=list)
 
 class AccountHeartbeat(BaseModel):
     account_number: int
@@ -76,8 +72,12 @@ class AccountHeartbeat(BaseModel):
     profit: float
     is_connected: bool
     margin_level: float | None = None
+    server: Optional[str] = None
+    currency: Optional[str] = None
+    leverage: Optional[int] = None
+    is_trade_allowed: Optional[bool] = None
     ea_id: Optional[str] = None
-    magic: Optional[int] = None
+    ea_version: Optional[str] = None
 
 class SymbolSpecSync(BaseModel):
     symbol: str
@@ -90,19 +90,16 @@ class SymbolSpecSync(BaseModel):
     volume_step: float
     stops_level_points: int = 0
     contract_size: float = 0.0
-    tick_value_profit: float = 0.0
-    tick_value_loss: float = 0.0
-    volume_limit: float = 0.0
-    freeze_level_points: int = 0
-    filling_mode: int = 0
-    trade_mode: int = 0
+
+class CommandAckRequest(BaseModel):
+    ea_id: str = ""
 
 # ===================================================================
 # Core Validation & Auth
 # ===================================================================
 
 def _authorize(x_mt5_key: str | None):
-    # [تعديل] تم إيقاف الحماية مؤقتاً للتأكد من الاتصال بقواعد البيانات بدون أخطاء المصادقة
+    # [مؤقت] إيقاف الحماية للتحقق من الاتصال
     pass
     # if config.require_mt5_api_key:
     #     if not config.mt5_api_key:
@@ -110,8 +107,6 @@ def _authorize(x_mt5_key: str | None):
     #     if x_mt5_key != config.mt5_api_key:
     #         raise HTTPException(401, "Invalid MT5 API key")
 
-# [FIX] تم توسيع الفريمات المسموحة لتشمل جميع فريمات الميتاتريدر القياسية
-# لمنع فشل المزامنة في حال تم تغيير إعدادات الإكسبرت
 _ALLOWED_TIMEFRAMES = {
     "M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20", "M30",
     "H1", "H2", "H3", "H4", "H6", "H8", "H12",
@@ -268,7 +263,7 @@ async def get_pending_commands(ea_id: str | None = None, limit: int = 10, x_mt5_
 
 
 @router.post("/commands/{command_id}/ack")
-async def ack_command(command_id: str, ea_id: str | None = None, x_mt5_key: str | None = Header(default=None)):
+async def ack_command(command_id: str, ack_req: CommandAckRequest, x_mt5_key: str | None = Header(default=None)):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
@@ -276,7 +271,7 @@ async def ack_command(command_id: str, ea_id: str | None = None, x_mt5_key: str 
             UPDATE trade_commands SET status='processing', ea_id=COALESCE(NULLIF(:ea_id,''),ea_id), updated_at=NOW()
             WHERE id=:id AND status='pending'
             RETURNING id
-        """), {"id": command_id, "ea_id": ea_id or ""}).first()
+        """), {"id": command_id, "ea_id": ack_req.ea_id or ""}).first()
         
         if not result:
             db.rollback()
@@ -299,7 +294,6 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
     data = await request.json()
     status_val = str(data.get("status", "failed")).lower()
     
-    # دعم الحالات الجديدة القادمة من الإكسبرت
     allowed = {"executed", "partial", "placed", "failed", "cancelled", "expired", "ignored"}
     if status_val not in allowed:
         raise HTTPException(400, f"Invalid command final status: {status_val}")
@@ -307,7 +301,7 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
     order_ticket = data.get("mt5_order_ticket", 0)
     deal_ticket = data.get("mt5_deal_ticket", 0)
     fill_price = data.get("fill_price", 0.0)
-    error_msg = str(data.get("message", data.get("error_message", "")))[:500]
+    error_msg = str(data.get("error_message", data.get("message", "")))[:500]
 
     db = SessionLocal()
     try:
@@ -349,7 +343,6 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
 @router.post("/specs/sync")
 async def sync_specs(spec: SymbolSpecSync, x_mt5_key: str | None = Header(default=None)):
     _authorize(x_mt5_key)
-    # [FIX] إزالة فحص tick_value للسماح بتسجيل البيانات حتى وإن كان السوق مغلقاً وأرسل MT5 قيمة 0.0
     if spec.point <= 0 or spec.tick_size <= 0 or spec.volume_min <= 0 or spec.volume_step <= 0:
         raise HTTPException(400, "Invalid symbol specification")
     db = SessionLocal()
@@ -376,40 +369,37 @@ async def sync_specs(spec: SymbolSpecSync, x_mt5_key: str | None = Header(defaul
 
 
 @router.post("/account/sync")
-async def sync_account(request: Request, x_mt5_key: str | None = Header(default=None)):
+async def sync_account(account_data: AccountHeartbeat, x_mt5_key: str | None = Header(default=None)):
     _authorize(x_mt5_key)
-    data = await request.json()
-    account_data = data.get("account", {})
-    login = account_data.get("login")
-    if login is None:
-        raise HTTPException(400, "account.login is required")
-        
-    balance = float(account_data.get("balance", 0))
-    equity = float(account_data.get("equity", 0))
-    margin = float(account_data.get("margin", 0))
-    free_margin = float(account_data.get("free_margin", 0))
-    profit = float(account_data.get("profit", equity - balance))
-    margin_level = float(account_data.get("margin_level", (equity / margin * 100 if margin > 0 else 0)))
-    server = account_data.get("server", "unknown")
-    
     db = SessionLocal()
     try:
+        margin_level = account_data.margin_level if account_data.margin_level is not None else (account_data.equity / account_data.margin * 100 if account_data.margin > 0 else 0)
+        server_name = account_data.server or "unknown"
+
         result = db.execute(text("""
             UPDATE trading_accounts SET balance=:balance,equity=:equity,margin=:margin,free_margin=:free_margin,
-              profit=:profit,margin_level=:margin_level,is_connected=true,last_sync=NOW(),last_heartbeat=NOW()
+              profit=:profit,margin_level=:margin_level,is_connected=:connected,last_sync=NOW(),last_heartbeat=NOW()
             WHERE account_number=:account AND server=:server
-        """), {"balance": balance, "equity": equity, "margin": margin, "free_margin": free_margin,
-               "profit": profit, "margin_level": margin_level, "account": login, "server": server})
+        """), {
+            "balance": account_data.balance, "equity": account_data.equity, "margin": account_data.margin,
+            "free_margin": account_data.free_margin, "profit": account_data.profit, "margin_level": margin_level,
+            "connected": account_data.is_connected, "account": account_data.account_number, "server": server_name
+        })
                 
         if result.rowcount == 0:
             db.execute(text("""
                 INSERT INTO trading_accounts(account_number,server,balance,equity,margin,free_margin,profit,margin_level,is_connected,last_sync,last_heartbeat)
-                VALUES(:account,:server,:balance,:equity,:margin,:free_margin,:profit,:margin_level,true,NOW(),NOW())
+                VALUES(:account,:server,:balance,:equity,:margin,:free_margin,:profit,:margin_level,:connected,NOW(),NOW())
                 ON CONFLICT(account_number, server) DO NOTHING
-            """), {"account": login, "server": server, "balance": balance, "equity": equity, "margin": margin,
-                   "free_margin": free_margin, "profit": profit, "margin_level": margin_level})
+            """), {
+                "account": account_data.account_number, "server": server_name, "balance": account_data.balance, 
+                "equity": account_data.equity, "margin": account_data.margin, "free_margin": account_data.free_margin, 
+                "profit": account_data.profit, "margin_level": margin_level, "connected": account_data.is_connected
+            })
+            
         db.commit()
-        return {"status": "success", "account_number": login}
+        return {"status": "success", "account_number": account_data.account_number}
+        
     except Exception as exc:
         db.rollback()
         logger.exception("Account sync failed: %s", exc)
