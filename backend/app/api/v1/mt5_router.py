@@ -108,10 +108,12 @@ def _authorize(x_mt5_key: str | None):
         if x_mt5_key != config.mt5_api_key:
             raise HTTPException(401, "Invalid MT5 API key")
 
+# [FIX] تم توسيع الفريمات المسموحة لتشمل جميع فريمات الميتاتريدر القياسية
+# لمنع فشل المزامنة في حال تم تغيير إعدادات الإكسبرت
 _ALLOWED_TIMEFRAMES = {
-    config.direction_timeframe,
-    config.confirmation_timeframe,
-    config.entry_timeframe,
+    "M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20", "M30",
+    "H1", "H2", "H3", "H4", "H6", "H8", "H12",
+    "D1", "W1", "MN1"
 }
 _ALLOWED_SYMBOLS = set(config.symbols)
 
@@ -345,7 +347,8 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
 @router.post("/specs/sync")
 async def sync_specs(spec: SymbolSpecSync, x_mt5_key: str | None = Header(default=None)):
     _authorize(x_mt5_key)
-    if spec.point <= 0 or spec.tick_size <= 0 or spec.tick_value <= 0 or spec.volume_min <= 0 or spec.volume_step <= 0:
+    # [FIX] إزالة فحص tick_value للسماح بتسجيل البيانات حتى وإن كان السوق مغلقاً وأرسل MT5 قيمة 0.0
+    if spec.point <= 0 or spec.tick_size <= 0 or spec.volume_min <= 0 or spec.volume_step <= 0:
         raise HTTPException(400, "Invalid symbol specification")
     db = SessionLocal()
     try:
