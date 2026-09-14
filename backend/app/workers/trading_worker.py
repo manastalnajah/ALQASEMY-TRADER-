@@ -174,8 +174,15 @@ def run_cycle_sync():
                 analyze_symbol(db, symbol, active_accounts)
                 
             db.commit()
+            
+        except Exception as inner_exc:
+            # 🔴 التعديل الأهم: تنظيف الجلسة قبل فك القفل لمنع الخطأ 25P02
+            db.rollback()
+            system_logger.error(f"Error during market analysis: {inner_exc}")
+            
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
+            db.commit() # تأكيد فك القفل
             
     except Exception as exc:
         db.rollback()
