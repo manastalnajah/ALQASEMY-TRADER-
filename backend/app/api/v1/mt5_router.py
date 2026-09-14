@@ -375,6 +375,7 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
 
     db = SessionLocal()
     try:
+        # 🛠️ التعديل الاحترافي هنا: السماح بتحديث الأمر سواء كان pending أو processing لمنع أخطاء التضارب
         result = db.execute(text("""
             UPDATE trade_commands 
             SET status=:status, 
@@ -384,7 +385,7 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
                 fill_price=:fill_price,
                 mt5_ticket=COALESCE(mt5_ticket, NULLIF(:order_ticket, 0)),
                 updated_at=NOW()
-            WHERE id=:id AND status='processing'
+            WHERE id=:id AND status IN ('pending', 'processing')
             RETURNING id
         """), {
             "id": command_id, 
@@ -396,7 +397,7 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
         }).first()
         
         if not result:
-            raise HTTPException(409, "Command is not in processing state")
+            raise HTTPException(409, "Command is not in a valid state for reporting")
         db.commit()
         return {"status": "success", "command_id": command_id, "state": status_val}
     except HTTPException:
@@ -408,7 +409,6 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
         raise HTTPException(500, "Command report failed")
     finally:
         db.close()
-
 
 @router.post("/specs/sync")
 async def sync_specs(spec: SymbolSpecSync, x_mt5_key: str | None = Header(default=None)):
