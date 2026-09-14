@@ -1,11 +1,15 @@
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, Request, Header
+from fastapi import APIRouter, HTTPException, Request, Header, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from sqlalchemy import text
 from database import SessionLocal
 from app.config import config
+
+# استيراد محرك التداول (العقل المدبر) لتشغيله في الخلفية
+# (تأكد من تعديل المسار 'app.YOUR_PATH' للمكان الفعلي لملف strategy_executor)
+from app.YOUR_PATH.strategy_executor import evaluate_and_execute_strategy
 
 router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 EA Integration"])
 logger = logging.getLogger("AlqasemyTrader.MT5")
@@ -101,11 +105,6 @@ class CommandAckRequest(BaseModel):
 def _authorize(x_mt5_key: str | None):
     # [مؤقت] إيقاف الحماية للتحقق من الاتصال
     pass
-    # if config.require_mt5_api_key:
-    #     if not config.mt5_api_key:
-    #         raise HTTPException(503, "MT5 API is locked: MT5_API_KEY is not configured")
-    #     if x_mt5_key != config.mt5_api_key:
-    #         raise HTTPException(401, "Invalid MT5 API key")
 
 _ALLOWED_TIMEFRAMES = {
     "M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20", "M30",
@@ -154,12 +153,69 @@ def _prune_candles(db, symbol: str, timeframe: str) -> None:
         )
     """), {"symbol": symbol, "tf": timeframe, "retention": retention})
 
+
+# ===================================================================
+# Background Tasks (المحرك الداخلي)
+# ===================================================================
+
+def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: CandleItem, ea_id: str):
+    """
+    هذه الدالة تعمل في الخلفية فور استلام شموع جديدة،
+    تقوم بجمع البيانات وتمريرها لمحرك التداول (العقل).
+    """
+    db = SessionLocal()
+    try:
+        # البحث عن رقم الحساب (UUID) المرتبط بهذا الإكسبرت
+        account = db.execute(
+            text("SELECT id FROM trading_accounts WHERE ea_id=:ea_id LIMIT 1"), 
+            {"ea_id": ea_id}
+        ).mappings().first()
+        
+        if not account:
+            logger.warning(f"No account linked to EA {ea_id}. Strategy execution skipped.")
+            return
+            
+        account_id = str(account["id"])
+
+        # تجهيز بيانات السوق كما يطلبها ملف الاستراتيجية
+        market_data = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "open_time": latest_candle.open_time,
+            "open": latest_candle.open,
+            "high": latest_candle.high,
+            "low": latest_candle.low,
+            "close": latest_candle.close,
+            "volume": latest_candle.volume,
+            "ea_id": ea_id,
+            "candle_key": latest_candle.open_time
+        }
+
+        # إيقاظ العقل المدبر واستدعاء دالة التقييم والتنفيذ
+        # يمكنك تغيير "scalping" هنا لتلائم الاستراتيجية المطلوبة
+        evaluate_and_execute_strategy(
+            db=db, 
+            account_id=account_id, 
+            strategy_name="scalping", 
+            market_data=market_data
+        )
+        
+    except Exception as e:
+        logger.error(f"Background Strategy Execution failed: {e}")
+    finally:
+        db.close()
+
+
 # ===================================================================
 # Endpoints
 # ===================================================================
 
 @router.post("/candles/sync")
-async def sync_candles(request: CandlesSyncRequest, x_mt5_key: str | None = Header(default=None)):
+async def sync_candles(
+    request: CandlesSyncRequest, 
+    background_tasks: BackgroundTasks, # تمت الإضافة هنا للمهام الخلفية
+    x_mt5_key: str | None = Header(default=None)
+):
     _authorize(x_mt5_key)
     if not request.candles:
         return {"status": "success", "inserted": 0, "received": 0}
@@ -188,6 +244,21 @@ async def sync_candles(request: CandlesSyncRequest, x_mt5_key: str | None = Head
             _prune_candles(db, symbol, tf)
 
         db.commit()
+
+        # =========================================================
+        # السحر هنا: تشغيل الاستراتيجية في الخلفية فور استلام الشموع
+        # =========================================================
+        if request.ea_id and len(request.candles) > 0:
+            latest_candle = request.candles[-1] # نأخذ أحدث شمعة
+            background_tasks.add_task(
+                run_strategy_in_background,
+                symbol=request.symbol.upper(),
+                timeframe=request.timeframe.upper(),
+                latest_candle=latest_candle,
+                ea_id=request.ea_id
+            )
+        # =========================================================
+
         return {
             "status": "success",
             "inserted": inserted,
