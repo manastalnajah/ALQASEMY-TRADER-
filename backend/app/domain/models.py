@@ -20,6 +20,52 @@ from database import Base
 
 
 # ============================================================
+# TRADING ACCOUNTS (تم إضافته هنا في القمة لكي يراه TradeCommand وباقي الجداول)
+# ============================================================
+
+class TradingAccount(Base):
+    __tablename__ = "trading_accounts"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        index=True,
+        server_default=text("uuid_generate_v4()"),
+    )
+
+    account_number = Column(
+        BigInteger,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    ea_id = Column(
+        String,
+        nullable=False,
+        default="",
+        index=True,
+    )
+
+    balance = Column(Float, nullable=False, default=0.0)
+    equity = Column(Float, nullable=False, default=0.0)
+    margin = Column(Float, nullable=False, default=0.0)
+    free_margin = Column(Float, nullable=False, default=0.0)
+    margin_level = Column(Float, nullable=False, default=0.0)
+
+    is_connected = Column(Boolean, nullable=False, default=False)
+    
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
+    last_sync = Column(DateTime(timezone=True), nullable=True)
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+    )
+
+
+# ============================================================
 # TRADE COMMANDS
 # ============================================================
 
@@ -129,19 +175,6 @@ class TradeCommand(Base):
             "status",
             "created_at",
         ),
-
-        Index(
-            "ix_trade_commands_symbol_status_created",
-            "symbol",
-            "status",
-            "created_at",
-        ),
-
-        # يجب أن يتطابق مع الـ partial unique index الموجود في DB.
-        # لا نعيد إنشاءه من SQLAlchemy لأن WHERE يحتاج PostgreSQL dialect.
-        #
-        # ux_trade_commands_account_signal_key
-        # موجود أصلًا في قاعدة البيانات.
     )
 
 
@@ -217,7 +250,6 @@ class Candle(Base):
             "open_time",
         ),
 
-        # القيد UNIQUE الموجود فعليًا في DB
         UniqueConstraint(
             "symbol_name",
             "timeframe",
@@ -422,9 +454,6 @@ class RiskState(Base):
             "account_id",
             "day_key",
         ),
-
-        # الـ unique partial index الحقيقي موجود في DB:
-        # ux_risk_state_account_day
     )
 
 
