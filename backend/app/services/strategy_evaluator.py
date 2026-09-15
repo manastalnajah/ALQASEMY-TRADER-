@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.strategies.strategy_manager import manager as strategy_manager
 from app.services import trade_service
@@ -22,7 +22,6 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
         return 0.0, 0.0
     risk_distance = atr * config.atr_sl_multiplier
     
-    # .startswith يغطي (BUY, BUY_LIMIT, BUY_STOP) و (SELL, SELL_LIMIT, SELL_STOP)
     if decision.startswith("BUY"):
         return entry - risk_distance, entry + (risk_distance * config.reward_risk)
     if decision.startswith("SELL"):
@@ -31,10 +30,6 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
 
 
 def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: str, market_data: dict):
-    """
-    تحديث مهم: تم إضافة `account_id` كمعامل إلزامي لتوجيه الإشارة للحساب الصحيح 
-    في بيئة تدعم حسابات متعددة.
-    """
     symbol = str(market_data.get("symbol") or "").upper()
     timeframe = str(market_data.get("timeframe") or config.timeframe).upper()
     candle_key = str(market_data.get("candle_key") or market_data.get("open_time") or "")
@@ -47,69 +42,66 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
     if strategy_name == "scalping" and not config.allow_scalping:
         return {"status": "ignored", "decision": "HOLD", "message": "Scalping disabled"}
 
-    result = strategy_manager.execute(strategy_name, market_data)
-    if isinstance(result, dict):
-        decision = str(result.get("decision", "HOLD")).upper()
-        entry = float(result.get("entry_price", 0.0) or 0.0)
-        sl = float(result.get("sl", 0.0) or 0.0)
-        tp = float(result.get("tp", 0.0) or 0.0)
-    else:
-        decision = str(result).upper()
-        entry, sl, tp = 0.0, 0.0, 0.0
-
-    if decision == "HOLD":
-        return {"status": "success", "decision": "HOLD"}
-
-    current = _price(market_data)
-    if entry <= 0:
-        entry = current
-    
-    sl, tp = _build_protection(market_data, decision, entry, sl, tp)
-    if sl <= 0 or tp <= 0:
-        system_logger.warning("🛑 %s %s rejected: no valid SL/TP", strategy_name, symbol)
-        return {"status": "blocked", "decision": "HOLD", "message": "No valid SL/TP"}
-
-    # Ensure geometry is correct before the risk engine sees it.
-    if decision.startswith("BUY") and not (sl < entry < tp):
-        return {"status": "blocked", "decision": "HOLD", "message": "Invalid BUY protection geometry"}
-    if decision.startswith("SELL") and not (tp < entry < sl):
-        return {"status": "blocked", "decision": "HOLD", "message": "Invalid SELL protection geometry"}
-
-    # التنسيق القياسي المعتمد لمفتاح الإشارة لمنع التكرار المطلق (Idempotency)
-    signal_key = f"{symbol}|{strategy_name}|{timeframe}|{candle_key}|{decision}"
-    
-    command = schemas.CommandCreate(
-        symbol=symbol,
-        order_type=decision,
-        # Risk engine calculates the authoritative size. This is only a placeholder.
-        lot_size=1.0,
-        entry_price=entry,
-        stop_loss=sl,
-        take_profit=tp,
-        strategy_name=strategy_name,
-        signal_key=signal_key,
-        ea_id=str(market_data.get("ea_id") or ""),
-    )
-    
     try:
-        # تمرير account_id إلزامي لدالة process_new_command كما عدلناها سابقاً
+        result = strategy_manager.execute(strategy_name, market_data)
+        if isinstance(result, dict):
+            decision = str(result.get("decision", "HOLD")).upper()
+            entry = float(result.get("entry_price", 0.0) or 0.0)
+            sl = float(result.get("sl", 0.0) or 0.0)
+            tp = float(result.get("tp", 0.0) or 0.0)
+        else:
+            decision = str(result).upper()
+            entry, sl, tp = 0.0, 0.0, 0.0
+
+        if decision == "HOLD":
+            return {"status": "success", "decision": "HOLD"}
+
+        current = _price(market_data)
+        if entry <= 0:
+            entry = current
+        
+        sl, tp = _build_protection(market_data, decision, entry, sl, tp)
+        if sl <= 0 or tp <= 0:
+            system_logger.warning("🛑 %s %s rejected: no valid SL/TP", strategy_name, symbol)
+            return {"status": "blocked", "decision": "HOLD", "message": "No valid SL/TP"}
+
+        if decision.startswith("BUY") and not (sl < entry < tp):
+            return {"status": "blocked", "decision": "HOLD", "message": "Invalid BUY protection geometry"}
+        if decision.startswith("SELL") and not (tp < entry < sl):
+            return {"status": "blocked", "decision": "HOLD", "message": "Invalid SELL protection geometry"}
+
+        signal_key = f"{symbol}|{strategy_name}|{timeframe}|{candle_key}|{decision}"
+        
+        command = schemas.CommandCreate(
+            symbol=symbol,
+            order_type=decision,
+            lot_size=1.0,
+            entry_price=entry,
+            stop_loss=sl,
+            take_profit=tp,
+            strategy_name=strategy_name,
+            signal_key=signal_key,
+            ea_id=str(market_data.get("ea_id") or ""),
+        )
+        
         created = trade_service.process_new_command(
             db=db, 
             command=command, 
             account_id=account_id, 
             enforce_risk=True
         )
-    except Exception as exc:
-        system_logger.warning("🛑 %s %s blocked for account %s: %s", strategy_name, symbol, account_id, exc)
-        return {"status": "blocked", "decision": "HOLD", "message": str(exc)}
 
-    return {
-        "status": "success",
-        "decision": decision,
-        "symbol": symbol,
-        "command_id": str(created.id),
-        "lot_size": created.lot_size,
-        "entry_price": created.entry_price,
-        "stop_loss": created.stop_loss,
-        "take_profit": created.take_profit,
-    }
+        return {
+            "status": "success",
+            "decision": decision,
+            "symbol": symbol,
+            "command_id": str(created.id),
+            "lot_size": created.lot_size,
+            "entry_price": created.entry_price,
+            "stop_loss": created.stop_loss,
+            "take_profit": created.take_profit,
+        }
+    except Exception as exc:
+        # 🛠️ التقاط أي خطأ زمني أو قاعدة بيانات لمنع توقف حلقة التداول ومعرفة السبب بدقة
+        system_logger.error("❌ Error in evaluate_and_execute_strategy for %s: %s", symbol, str(exc))
+        return {"status": "blocked", "decision": "HOLD", "message": str(exc)}
