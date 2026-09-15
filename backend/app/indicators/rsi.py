@@ -1,37 +1,23 @@
-def calculate_rsi(prices: list[float], period: int = 14) -> float | None:
+import pandas as pd
+from .atr import calculate_wilders_rma
+
+def calculate_rsi(df: pd.DataFrame, column: str = 'close', period: int = 14) -> pd.Series:
     """
-    دالة لحساب مؤشر القوة النسبية (Relative Strength Index).
-    الذي يقيس سرعة وتغير حركات السعر لاكتشاف مناطق التشبع.
+    حساب مؤشر القوة النسبية (RSI) بدقة MT5 باستخدام Pandas وتنعيم وايلدر (RMA)
     """
-    if not prices or len(prices) < period + 1:
-        return None
-        
-    gains = []
-    losses = []
+    delta = df[column].diff()
     
-    # حساب التغير في السعر بين كل شمعة والتي قبلها
-    for i in range(1, len(prices)):
-        change = prices[i] - prices[i-1]
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-            
-    # حساب متوسط المكاسب والخسائر للفترة المحددة
-    recent_gains = gains[-period:]
-    recent_losses = losses[-period:]
+    # فصل المكاسب عن الخسائر
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
     
-    avg_gain = sum(recent_gains) / period
-    avg_loss = sum(recent_losses) / period
+    # تطبيق تنعيم وايلدر الأساسي للمطابقة مع الميتاتريدر
+    avg_gain = calculate_wilders_rma(gain, period)
+    avg_loss = calculate_wilders_rma(loss, period)
     
-    # إذا لم تكن هناك خسائر، السعر في صعود مستمر (تشبع شرائي أقصى)
-    if avg_loss == 0:
-        return 100.0
-        
-    # المعادلة الرئيسية للمؤشر
+    # حساب قيمة RS و RSI
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     
-    return round(rsi, 2)
+    # معالجة حالات القسمة على صفر أو القيم المفقودة
+    return rsi.fillna(100).where(avg_loss != 0, 100.0)
