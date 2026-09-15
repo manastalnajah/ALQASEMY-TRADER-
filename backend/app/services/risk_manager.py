@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import uuid
 from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -12,7 +13,7 @@ ACTIVE_STATUS_VALUES = ("pending", "processing")
 
 
 def _utcnow() -> datetime:
-    # 🛠️ الحل النهائي والجذري: إرجاع تاريخ واعي بالمنطقة الزمنية (Offset-aware) ليتطابق تماماً مع تواريخ قاعدة البيانات
+    # 🛠️ إرجاع تاريخ واعي بالمنطقة الزمنية (Offset-aware) ليتطابق تماماً مع تواريخ قاعدة البيانات
     return datetime.now(timezone.utc)
 
 
@@ -57,7 +58,7 @@ def _fresh_account(db: Session, account_id: str):
 
 
 def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
-    """إدارة حالة المخاطر مخصصة لكل حساب وكل يوم تداول بناءً على قيود قاعدة البيانات الجديدة"""
+    """إدارة حالة المخاطر مخصصة لكل حساب وكل يوم تداول مع توليد UUID يدوي لعمود id"""
     day_key = _utcnow().strftime("%Y-%m-%d")
     
     state = db.execute(text("""
@@ -67,13 +68,26 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
     """), {"account_id": account_id, "day_key": day_key}).mappings().first()
     
     if not state:
-        # إدراج حالة جديدة لهذا الحساب في هذا اليوم
-        db.execute(text("""
-            INSERT INTO risk_state (account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
-            VALUES (:account_id, :day_key, :equity, :equity, false, '', :now)
-            ON CONFLICT (account_id, day_key) DO NOTHING
-        """), {"account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
-        return {"day_key": day_key, "day_start_equity": equity, "high_water_equity": equity, "trading_halted": False, "halt_reason": ""}
+        try:
+            # 🛠️ توليد معرف فريد يدوي لتجنب خطأ not-null constraint لعمود id
+            new_id = str(uuid.uuid4())
+            db.execute(text("""
+                INSERT INTO risk_state (id, account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
+                VALUES (:id, :account_id, :day_key, :equity, :equity, false, '', :now)
+                ON CONFLICT (account_id, day_key) DO NOTHING
+            """), {"id": new_id, "account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
+            db.commit()
+        except Exception:
+            db.rollback()
+            
+        # إعادة الجلب للتأكد من وجود السجل بعد المحاولة
+        state = db.execute(text("""
+            SELECT * FROM risk_state 
+            WHERE account_id = :account_id AND day_key = :day_key
+        """), {"account_id": account_id, "day_key": day_key}).mappings().first()
+        
+        if not state:
+            return {"day_key": day_key, "day_start_equity": equity, "high_water_equity": equity, "trading_halted": False, "halt_reason": ""}
 
     high = max(float(state["high_water_equity"] or equity), equity)
     if high != float(state["high_water_equity"] or 0):
@@ -81,6 +95,7 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
             UPDATE risk_state SET high_water_equity=:high, updated_at=:now 
             WHERE account_id=:account_id AND day_key=:day_key
         """), {"high": high, "now": _utcnow(), "account_id": account_id, "day_key": day_key})
+        db.commit()
         
     return dict(state, high_water_equity=high)
 
