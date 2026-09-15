@@ -46,7 +46,7 @@ class TradingConfig:
     entry_candle_retention: int = _int("ENTRY_CANDLE_RETENTION", 20000)
     candle_sync_batch_size: int = _int("CANDLE_SYNC_BATCH_SIZE", 1000)
 
-   enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "golden").split(",") if s.strip())
+    enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "golden").split(",") if s.strip())
     # ==========================================
     # 🚨 إعدادات إدارة رأس المال والاختبار
     # ==========================================
