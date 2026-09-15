@@ -6,6 +6,9 @@ from app.indicators.adx import calculate_adx
 from app.logging.logger import system_logger
 
 class GoldenSetupStrategy(BaseStrategy):
+    def __init__(self):
+        super().__init__(name="golden")
+
     def analyze(self, market_data: dict) -> dict:
         # 1. استخراج بيانات الشموع
         candles = market_data.get("candles", [])
