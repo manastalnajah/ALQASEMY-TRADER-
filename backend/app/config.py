@@ -61,7 +61,7 @@ class TradingConfig:
     max_drawdown_pct: float = _float("MAX_DRAWDOWN_PCT", 10.0)
     min_margin_level_pct: float = _float("MIN_MARGIN_LEVEL_PCT", 300.0)
     max_margin_usage_pct: float = _float("MAX_MARGIN_USAGE_PCT", 50.0)
-    account_stale_seconds: int = _int("ACCOUNT_STALE_SECONDS", 45)
+    account_stale_seconds: int = _int("ACCOUNT_STALE_SECONDS", 120)
     signal_cooldown_minutes: int = _int("SIGNAL_COOLDOWN_MINUTES", 5)
     pending_expiry_minutes: int = _int("PENDING_EXPIRY_MINUTES", 60)
 
