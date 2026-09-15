@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 
 class BaseStrategy(ABC):
-    def __init__(self, name: str):
+    def __init__(self, name: str = "strategy"):
         self.name = name
 
     @abstractmethod
