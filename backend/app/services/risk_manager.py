@@ -57,10 +57,12 @@ def _fresh_account(db: Session, account_id: str):
     return account, None
 
 
+
 def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
-    """إدارة حالة المخاطر مخصصة لكل حساب وكل يوم تداول مع توليد UUID يدوي لعمود id"""
+    """إدارة حالة المخاطر بطريقة آمنة بالكامل تتجنب مشاكل الـ ON CONFLICT وقيود الـ id"""
     day_key = _utcnow().strftime("%Y-%m-%d")
     
+    # 1. محاولة جلب السجل قيد القفل المتزامن
     state = db.execute(text("""
         SELECT * FROM risk_state 
         WHERE account_id = :account_id AND day_key = :day_key 
@@ -69,21 +71,21 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
     
     if not state:
         try:
-            # 🛠️ توليد معرف فريد يدوي لتجنب خطأ not-null constraint لعمود id
-            new_id = str(uuid.uuid4())
+            # 2. إذا لم يكن موجوداً، نقوم بإدخاله مباشرة مع السماح بقاعدة البيانات بتوليد الـ id أو تخطيه بأمان
             db.execute(text("""
-                INSERT INTO risk_state (id, account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
-                VALUES (:id, :account_id, :day_key, :equity, :equity, false, '', :now)
-                ON CONFLICT (account_id, day_key) DO NOTHING
-            """), {"id": new_id, "account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
+                INSERT INTO risk_state (account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
+                VALUES (:account_id, :day_key, :equity, :equity, false, '', :now)
+            """), {"account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
             db.commit()
-        except Exception:
-            db.rollback()
+        except Exception as insert_err:
+            db.rollback()  # تراجع آمن في حال سبق وتم إدخاله بواسطة عملية متزامنة أخرى
+            system_logger.debug(f"Risk state insert handled gracefully: {insert_err}")
             
-        # إعادة الجلب للتأكد من وجود السجل بعد المحاولة
+        # 3. إعادة الجلب للتأكد من الحصول عليه بعد الإدخال الناجح
         state = db.execute(text("""
             SELECT * FROM risk_state 
             WHERE account_id = :account_id AND day_key = :day_key
+            FOR UPDATE
         """), {"account_id": account_id, "day_key": day_key}).mappings().first()
         
         if not state:
@@ -98,7 +100,6 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
         db.commit()
         
     return dict(state, high_water_equity=high)
-
 
 def _active_counts(db: Session, account_id: str, account_number: int, symbol: str):
     """فصل الأوامر والصفقات المعلقة بناءً على الحساب لمنع التداخل"""
