@@ -10,16 +10,37 @@ from app.config import config
 from app.indicators.atr import calculate_atr
 
 
+def _safe_float(val, default: float = 0.0) -> float:
+    """
+    دالة آمنة لتحويل أي قيمة إلى float حتى لو كانت Pandas Series أو قائمة
+    """
+    if val is None:
+        return default
+    # إذا كانت القيمة عمود Pandas Series أو DataFrame، خذ آخر قيمة بأمان
+    if hasattr(val, "iloc"):
+        val = val.iloc[-1]
+    elif isinstance(val, (list, tuple)) and len(val) > 0:
+        val = val[-1]
+    
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def _price(market_data: dict) -> float:
-    return float(market_data.get("close") or market_data.get("price") or 0.0)
+    raw_price = market_data.get("close") or market_data.get("price") or 0.0
+    return _safe_float(raw_price)
 
 
 def _build_protection(market_data: dict, decision: str, entry: float, sl: float, tp: float):
     if sl > 0 and tp > 0:
         return sl, tp
-    atr = float(market_data.get("atr") or 0.0)
+    
+    atr = _safe_float(market_data.get("atr"), 0.0)
     if atr <= 0:
         return 0.0, 0.0
+        
     risk_distance = atr * config.atr_sl_multiplier
     
     if decision.startswith("BUY"):
@@ -33,27 +54,21 @@ def _calculate_dynamic_lot(db: Session, account_id: str, symbol: str, entry: flo
     """
     حساب اللوت الديناميكي باحترافية بناءً على نسبة المخاطرة والـ ATR
     """
-    # 1. جلب رأس المال (إذا كان متوفراً في الداتا، أو وضع 10000 كافتراضي لحمايتك)
-    balance = float(market_data.get("balance") or market_data.get("equity") or 10000.0)
+    balance = _safe_float(market_data.get("balance") or market_data.get("equity"), 10000.0)
     
-    # 2. حساب المبلغ المعرض للمخاطرة (مثلاً 0.5% من 10,000 = 50 دولار)
     risk_amount = balance * (config.risk_per_trade_pct / 100.0)
     
-    # 3. حساب المسافة بين نقطة الدخول ووقف الخسارة
     sl_distance = abs(entry - sl)
     if sl_distance <= 0:
         return 0.01  # أقل لوت ممكن لحماية الحساب إذا كان الوقف غير منطقي
 
-    # 4. حساب اللوت بناءً على خصائص الزوج (Tick Size & Tick Value)
-    tick_size = float(market_data.get("tick_size") or 0.0)
-    tick_value = float(market_data.get("tick_value") or 0.0)
+    tick_size = _safe_float(market_data.get("tick_size"), 0.0)
+    tick_value = _safe_float(market_data.get("tick_value"), 0.0)
     
     if tick_size > 0 and tick_value > 0:
-        # حساب احترافي دقيق من بيانات البروكر
         ticks_at_risk = sl_distance / tick_size
         lot_size = risk_amount / (ticks_at_risk * tick_value)
     else:
-        # حساب تقريبي قياسي في حال لم تتوفر بيانات البروكر لحظياً
         if "XAU" in symbol:
             lot_size = risk_amount / (sl_distance * 100)
         elif "JPY" in symbol:
@@ -61,10 +76,8 @@ def _calculate_dynamic_lot(db: Session, account_id: str, symbol: str, entry: flo
         else:
             lot_size = risk_amount / (sl_distance * 100000)
 
-    # 5. تنظيف الرقم ليتوافق مع منصة الميتاتريدر
     lot_size = round(lot_size, 2)
     
-    # 6. فرض الحدود الآمنة (Min / Max)
     if lot_size < 0.01:
         lot_size = 0.01
     if lot_size > config.max_symbol_exposure_lots:
@@ -90,9 +103,9 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         result = strategy_manager.execute(strategy_name, market_data)
         if isinstance(result, dict):
             decision = str(result.get("decision", "HOLD")).upper()
-            entry = float(result.get("entry_price", 0.0) or 0.0)
-            sl = float(result.get("sl", 0.0) or 0.0)
-            tp = float(result.get("tp", 0.0) or 0.0)
+            entry = _safe_float(result.get("entry_price", 0.0))
+            sl = _safe_float(result.get("sl", 0.0))
+            tp = _safe_float(result.get("tp", 0.0))
         else:
             decision = str(result).upper()
             entry, sl, tp = 0.0, 0.0, 0.0
@@ -114,7 +127,6 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         if decision.startswith("SELL") and not (tp < entry < sl):
             return {"status": "blocked", "decision": "HOLD", "message": "Invalid SELL protection geometry"}
 
-        # 💡 استدعاء دالة حساب اللوت الديناميكي التي برمجناها
         calculated_lot_size = _calculate_dynamic_lot(db, account_id, symbol, entry, sl, market_data)
 
         signal_key = f"{symbol}|{strategy_name}|{timeframe}|{candle_key}|{decision}"
@@ -122,7 +134,7 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         command = schemas.CommandCreate(
             symbol=symbol,
             order_type=decision,
-            lot_size=calculated_lot_size,  # 🔥 تم استبدال 1.0 باللوت الديناميكي
+            lot_size=calculated_lot_size,
             entry_price=entry,
             stop_loss=sl,
             take_profit=tp,
@@ -149,6 +161,5 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
             "take_profit": created.take_profit,
         }
     except Exception as exc:
-        # 🛠️ التقاط أي خطأ زمني أو قاعدة بيانات لمنع توقف حلقة التداول ومعرفة السبب بدقة
         system_logger.error("❌ Error in evaluate_and_execute_strategy for %s: %s", symbol, str(exc))
         return {"status": "blocked", "decision": "HOLD", "message": str(exc)}
