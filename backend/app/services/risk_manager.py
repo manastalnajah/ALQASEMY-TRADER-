@@ -12,8 +12,8 @@ ACTIVE_STATUS_VALUES = ("pending", "processing")
 
 
 def _utcnow() -> datetime:
-    # 🛠️ الحل الجذري: توحيد التوقيت ليكون متوافقاً تماماً مع قواعد البيانات بدون تباين زمني
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # 🛠️ الحل النهائي والجذري: إرجاع تاريخ واعي بالمنطقة الزمنية (Offset-aware) ليتطابق تماماً مع تواريخ قاعدة البيانات
+    return datetime.now(timezone.utc)
 
 
 def _round_step(value: float, step: float) -> float:
@@ -37,15 +37,19 @@ def _fresh_account(db: Session, account_id: str):
     if not account:
         return None, "NO_ACCOUNT"
     if not account["is_connected"]:
-        return None, "ACCOUNT_DISCONNECTED"
+        return None, "ACCOUNT_CONNECTED_FALSE"
     stamp = account.get("last_heartbeat") or account.get("last_sync")
     if stamp is None:
         return None, "ACCOUNT_TIMESTAMP_MISSING"
     if isinstance(stamp, str):
         try:
-            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).replace(tzinfo=None)
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
         except ValueError:
             return None, "ACCOUNT_TIMESTAMP_INVALID"
+    # ضمان توافق المنطقة الزمنية للطرح الآمن
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    
     age = (_utcnow() - stamp).total_seconds()
     if age > config.account_stale_seconds:
         return None, f"ACCOUNT_STALE_{int(age)}S"
@@ -218,7 +222,10 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
         return None, "POSITION_SNAPSHOT_MISSING"
     snap = snapshot[0]
     if isinstance(snap, str):
-        snap = datetime.fromisoformat(snap.replace("Z", "+00:00")).replace(tzinfo=None)
+        snap = datetime.fromisoformat(snap.replace("Z", "+00:00"))
+    if snap.tzinfo is None:
+        snap = snap.replace(tzinfo=timezone.utc)
+        
     if (_utcnow() - snap).total_seconds() > config.account_stale_seconds:
         return None, "POSITION_SNAPSHOT_STALE"
 
