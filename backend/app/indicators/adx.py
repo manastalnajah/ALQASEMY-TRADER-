@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from app.indicators.atr import calculate_atr, calculate_wilders_rma
+
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """
     حساب مؤشر متوسط الاتجاه (ADX) لفلترة الأسواق العرضية
