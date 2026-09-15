@@ -8,11 +8,12 @@ from sqlalchemy.orm import Session
 from app.config import config
 from app.logging.logger import system_logger
 
-ACTIVE_STATUSES = ("pending", "processing")
+ACTIVE_STATUS_VALUES = ("pending", "processing")
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    # 🛠️ الحل الجذري: توحيد التوقيت ليكون متوافقاً تماماً مع قواعد البيانات بدون تباين زمني
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _round_step(value: float, step: float) -> float:
