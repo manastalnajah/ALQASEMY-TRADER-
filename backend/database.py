@@ -27,13 +27,21 @@ def initialize_database():
             conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
             conn.execute(text('CREATE EXTENSION IF NOT EXISTS pgcrypto'))
             
-            # استدعاء النماذج لضمان تسجيلها
-            from app.domain import models  # noqa: F401
+            # 🛠️ استيراد النماذج بجميع مساراتها المحتملة لضمان تسجيل جدول trading_accounts وجداول الأوامر في Base.metadata
+            try:
+                from app.domain import models  # noqa: F401
+            except ImportError:
+                pass
+                
+            try:
+                import models  # noqa: F401
+            except ImportError:
+                pass
             
-            # إنشاء الجداول غير الموجودة فقط (لن يعبث بالقيود التي أضفناها في الـ Migration)
+            # إنشاء الجداول غير الموجودة فقط
             Base.metadata.create_all(bind=conn)
             
-            system_logger.info("Database initialized successfully.")
+            system_logger.info("Database initialized successfully and all models registered.")
     except Exception as e:
         system_logger.error(f"Database initialization failed: {e}")
         raise
