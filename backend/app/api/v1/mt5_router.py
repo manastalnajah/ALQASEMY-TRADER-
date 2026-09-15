@@ -373,19 +373,22 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
     fill_price = data.get("fill_price", 0.0)
     error_msg = str(data.get("error_message", data.get("message", "")))[:500]
 
+    # 🛠️ الحل الجذري: تحويل رقم التيكت إلى نص إذا كان موجوداً لتطابق نوع البيانات
+    mt5_ticket_str = str(order_ticket) if order_ticket else None
+
     db = SessionLocal()
     try:
-        # 🛠️ التعديل الاحترافي هنا: السماح بتحديث الأمر سواء كان pending أو processing لمنع أخطاء التضارب
+        # 🛠️ إضافة CAST لضمان التوافق التام مع أنواع بيانات PostgreSQL (UUID و BIGINT و NUMERIC)
         result = db.execute(text("""
             UPDATE trade_commands 
             SET status=:status, 
                 error_message=:error,
-                mt5_order_ticket=:order_ticket,
-                mt5_deal_ticket=:deal_ticket,
-                fill_price=:fill_price,
-                mt5_ticket=COALESCE(mt5_ticket, NULLIF(:order_ticket, 0)),
+                mt5_order_ticket=CAST(:order_ticket AS BIGINT),
+                mt5_deal_ticket=CAST(:deal_ticket AS BIGINT),
+                fill_price=CAST(:fill_price AS NUMERIC),
+                mt5_ticket=COALESCE(mt5_ticket, :mt5_ticket_str),
                 updated_at=NOW()
-            WHERE id=:id AND status IN ('pending', 'processing')
+            WHERE id=CAST(:id AS UUID) AND status IN ('pending', 'processing')
             RETURNING id
         """), {
             "id": command_id, 
@@ -393,7 +396,8 @@ async def report_command(command_id: str, request: Request, x_mt5_key: str | Non
             "error": error_msg,
             "order_ticket": order_ticket,
             "deal_ticket": deal_ticket,
-            "fill_price": fill_price
+            "fill_price": fill_price,
+            "mt5_ticket_str": mt5_ticket_str
         }).first()
         
         if not result:
