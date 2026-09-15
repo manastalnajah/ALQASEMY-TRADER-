@@ -32,9 +32,7 @@ class TradingConfig:
 
     worker_interval_seconds: int = _int("WORKER_INTERVAL_SECONDS", 5)
 
-    # Historical candle windows used by the MTF engine. These are deliberately
-    # larger than the indicator minimum so MA/RSI/ATR calculations start from
-    # a stable history rather than from a bare minimum window.
+    # Historical candle windows used by the MTF engine.
     direction_candle_limit: int = _int("DIRECTION_CANDLE_LIMIT", 200)
     confirmation_candle_limit: int = _int("CONFIRMATION_CANDLE_LIMIT", 300)
     entry_candle_limit: int = _int("ENTRY_CANDLE_LIMIT", 500)
@@ -43,9 +41,6 @@ class TradingConfig:
     # Legacy setting retained for compatibility with older deployments.
     candle_limit: int = _int("CANDLE_LIMIT", 500)
 
-    # Database retention is larger than the calculation windows. This allows
-    # recovery/backfill, diagnostics and stable restarts without keeping an
-    # unlimited market-data table.
     direction_candle_retention: int = _int("DIRECTION_CANDLE_RETENTION", 5000)
     confirmation_candle_retention: int = _int("CONFIRMATION_CANDLE_RETENTION", 10000)
     entry_candle_retention: int = _int("ENTRY_CANDLE_RETENTION", 20000)
@@ -53,21 +48,33 @@ class TradingConfig:
 
     enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "crossover,rsi").split(",") if s.strip())
 
-    risk_per_trade_pct: float = _float("RISK_PER_TRADE_PCT", 0.5)
-    max_open_positions: int = _int("MAX_OPEN_POSITIONS", 5)
-    max_pending_orders: int = _int("MAX_PENDING_ORDERS", 5)
-    max_symbol_exposure_lots: float = _float("MAX_SYMBOL_EXPOSURE_LOTS", 5.0)
-    max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 10.0)
-    max_drawdown_pct: float = _float("MAX_DRAWDOWN_PCT", 10.0)
+    # ==========================================
+    # 🚨 إعدادات إدارة رأس المال والاختبار
+    # ==========================================
+    risk_per_trade_pct: float = _float("RISK_PER_TRADE_PCT", 0.5)  # 0.5% مخاطرة فقط من رأس المال للصفقة
+    max_open_positions: int = _int("MAX_OPEN_POSITIONS", 50)       # فتح المجال لـ 50 صفقة للاختبار
+    max_pending_orders: int = _int("MAX_PENDING_ORDERS", 50)
+    max_symbol_exposure_lots: float = _float("MAX_SYMBOL_EXPOSURE_LOTS", 2.0)  # أقصى لوت متراكم للزوج
+    
+    # تعطيل الإيقاف اليومي للاختبار المستمر
+    max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 100.0) 
+    max_drawdown_pct: float = _float("MAX_DRAWDOWN_PCT", 100.0)
+    
     min_margin_level_pct: float = _float("MIN_MARGIN_LEVEL_PCT", 300.0)
     max_margin_usage_pct: float = _float("MAX_MARGIN_USAGE_PCT", 50.0)
     account_stale_seconds: int = _int("ACCOUNT_STALE_SECONDS", 120)
-    signal_cooldown_minutes: int = _int("SIGNAL_COOLDOWN_MINUTES", 5)
+    
+    # تقليل الانتظار لالتقاط الإشارات بشكل أسرع
+    signal_cooldown_minutes: int = _int("SIGNAL_COOLDOWN_MINUTES", 1) 
     pending_expiry_minutes: int = _int("PENDING_EXPIRY_MINUTES", 60)
 
+    # ==========================================
+    # 🎯 إعدادات الاستراتيجية والوقف والأهداف
+    # ==========================================
     atr_period: int = _int("ATR_PERIOD", 14)
-    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 1.5)
-    reward_risk: float = _float("REWARD_RISK", 2.0)
+    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 4.0)  # توسيع الوقف ليصبح 4 أضعاف التذبذب (آمن جداً)
+    reward_risk: float = _float("REWARD_RISK", 1.5)              # الهدف مرة ونصف مسافة الوقف
+    
     max_spread_points: float = _float("MAX_SPREAD_POINTS", 30.0)
 
     allow_smart_limits: bool = os.getenv("ALLOW_SMART_LIMITS", "false").lower() == "true"
