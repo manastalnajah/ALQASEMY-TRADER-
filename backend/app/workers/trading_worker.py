@@ -13,6 +13,21 @@ from app.api.v1.bot_router import is_bot_running
 VALID_DECISIONS = {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
 
 
+def _get_last_val(data) -> float:
+    """
+    🛡️ دالة دفاعية لاستخراج القيمة الأخيرة من أي نوع بيانات (Pandas Series, List, Float)
+    """
+    if data is None:
+        return 0.0
+    if hasattr(data, 'iloc'):
+        # استخراج الشمعة الأخيرة إذا كانت Pandas Series
+        val = data.iloc[-1]
+        return float(val)
+    if isinstance(data, (list, tuple)) and len(data) > 0:
+        return float(data[-1])
+    return float(data)
+
+
 def _load_candles(db, symbol: str, timeframe: str, limit: int):
     rows = db.execute(text("""
         SELECT open_time, open, high, low, close, volume
@@ -28,16 +43,24 @@ def _ma_context(candles, fast_period=10, slow_period=50):
     closes = [float(r["close"]) for r in candles]
     if len(closes) < slow_period + 1:
         return None
+        
     fast = calculate_sma(closes, fast_period)
     slow = calculate_sma(closes, slow_period)
+    
     if fast is None or slow is None:
         return None
+        
+    # ✅ استخدام الدالة الآمنة لاستخراج الأرقام المفردة
+    fast_val = _get_last_val(fast)
+    slow_val = _get_last_val(slow)
+    close_val = float(closes[-1])
+    
     return {
-        "fast_ma": float(fast),
-        "slow_ma": float(slow),
-        "close": float(closes[-1]),
-        "bullish": float(fast) > float(slow) and float(closes[-1]) > float(slow),
-        "bearish": float(fast) < float(slow) and float(closes[-1]) < float(slow),
+        "fast_ma": fast_val,
+        "slow_ma": slow_val,
+        "close": close_val,
+        "bullish": fast_val > slow_val and close_val > slow_val,
+        "bearish": fast_val < slow_val and close_val < slow_val,
     }
 
 
@@ -47,8 +70,6 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
     يتم تقييم السوق (الشموع والمؤشرات) مرة واحدة توفيراً للموارد، 
     ثم يتم إرسال الإشارة لكل حساب ليتم تسعيرها بحجم اللوت الخاص به.
     """
-    # Professional MTF pipeline:
-    # H1 = market direction, M15 = confirmation, M5 = entry signal.
     direction_candles = _load_candles(db, symbol, config.direction_timeframe, config.direction_candle_limit)
     confirmation_candles = _load_candles(db, symbol, config.confirmation_timeframe, config.confirmation_candle_limit)
     entry_candles = _load_candles(db, symbol, config.entry_timeframe, config.entry_candle_limit)
@@ -60,10 +81,10 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
 
     direction = _ma_context(direction_candles)
     confirmation = _ma_context(confirmation_candles)
+    
     if not direction or not confirmation:
         return
 
-    # H1 and M15 must agree before M5 is allowed to generate an entry.
     if direction["bullish"] and confirmation["bullish"]:
         market_bias = "BUY"
     elif direction["bearish"] and confirmation["bearish"]:
@@ -86,11 +107,13 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
     atr = calculate_atr(highs, lows, closes, config.atr_period)
     ma14 = calculate_sma(closes, 14)
     ma14_prev = calculate_sma(closes[:-1], 14)
+    
     if None in (fast, slow, fast_prev, slow_prev, rsi, rsi_prev, atr, ma14, ma14_prev):
         return
 
     latest = entry_candles[-1]
     spec = db.execute(text("SELECT point, digits, tick_size, tick_value FROM symbol_specs WHERE symbol=:symbol"), {"symbol": symbol}).mappings().first()
+    
     if not spec:
         system_logger.warning("🛑 %s: symbol specification missing; trading blocked", symbol)
         return
@@ -117,27 +140,25 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
         "low": float(latest["low"]),
         "close": float(latest["close"]),
         "price": float(latest["close"]),
-        "fast_ma": float(fast),
-        "slow_ma": float(slow),
-        "fast_ma_prev": float(fast_prev),
-        "slow_ma_prev": float(slow_prev),
-        "rsi": float(rsi),
-        "rsi_prev": float(rsi_prev),
-        "atr": float(atr),
-        "ma_14": float(ma14),
-        "ma_14_prev": float(ma14_prev),
+        # ✅ تمرير المؤشرات عبر الدالة الآمنة لاستخراج الأرقام وحل الخطأ نهائياً!
+        "fast_ma": _get_last_val(fast),
+        "slow_ma": _get_last_val(slow),
+        "fast_ma_prev": _get_last_val(fast_prev),
+        "slow_ma_prev": _get_last_val(slow_prev),
+        "rsi": _get_last_val(rsi),
+        "rsi_prev": _get_last_val(rsi_prev),
+        "atr": _get_last_val(atr),
+        "ma_14": _get_last_val(ma14),
+        "ma_14_prev": _get_last_val(ma14_prev),
         "point": float(spec["point"]),
     }
 
-    # تطبيق الإستراتيجيات لكل حساب نشط
     for account in active_accounts:
         market_for_account = market.copy()
-        # حقن معرف الـ EA الخاص بالحساب
         market_for_account["ea_id"] = str(account["ea_id"] or "")
         account_id = str(account["id"])
         
         for strategy_name in config.enabled_strategies:
-            # تمرير account_id بشكل إلزامي
             result = evaluate_and_execute_strategy(db, account_id, strategy_name, market_for_account)
             
             if result.get("decision") in VALID_DECISIONS:
@@ -145,7 +166,7 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
                                    account["account_number"], symbol, market_bias, 
                                    confirmation["bullish"] and "BUY" or confirmation["bearish"] and "SELL" or "NEUTRAL", 
                                    config.entry_timeframe, strategy_name, result)
-                break  # إذا نجحت استراتيجية، ننتقل للرمز/الحساب التالي ولا نُكمل باقي الاستراتيجيات لنفس الرمز
+                break
 
 
 def run_cycle_sync():
@@ -154,13 +175,11 @@ def run_cycle_sync():
         if not is_bot_running(db):
             return
         
-        # One DB advisory lock protects against two API instances running workers simultaneously.
         acquired = db.execute(text("SELECT pg_try_advisory_lock(hashtext('ALQASEMY:TRADING_WORKER'))")).scalar()
         if not acquired:
             return
             
         try:
-            # جلب الحسابات النشطة والمتصلة حالياً
             active_accounts = db.execute(text("""
                 SELECT id, account_number, ea_id 
                 FROM trading_accounts 
@@ -168,7 +187,7 @@ def run_cycle_sync():
             """)).mappings().all()
             
             if not active_accounts:
-                return  # لا يوجد حسابات نشطة، لا داعي لإرهاق السيرفر بتحليل الشموع
+                return
                 
             for symbol in config.symbols:
                 analyze_symbol(db, symbol, active_accounts)
@@ -176,13 +195,12 @@ def run_cycle_sync():
             db.commit()
             
         except Exception as inner_exc:
-            # 🔴 التعديل الأهم: تنظيف الجلسة قبل فك القفل لمنع الخطأ 25P02
             db.rollback()
             system_logger.error(f"Error during market analysis: {inner_exc}")
             
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
-            db.commit() # تأكيد فك القفل
+            db.commit()
             
     except Exception as exc:
         db.rollback()
