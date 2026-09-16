@@ -1,4 +1,5 @@
 import asyncio
+import pandas as pd  # 👈 1. تم إضافة مكتبة البانداس هنا
 from sqlalchemy import text
 from database import SessionLocal
 from app.config import config
@@ -104,11 +105,20 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
     slow_prev = calculate_sma(closes[:-1], 50)
     rsi = calculate_rsi(closes, 14)
     rsi_prev = calculate_rsi(closes[:-1], 14)
-    atr = calculate_atr(highs, lows, closes, config.atr_period)
+    
+    # 👈 2. الإصلاح الجذري لمشكلة الـ ATR بوضع البيانات في DataFrame أولاً
+    df_for_atr = pd.DataFrame({
+        "high": highs,
+        "low": lows,
+        "close": closes
+    })
+    atr = calculate_atr(df_for_atr, config.atr_period)
+    
     ma14 = calculate_sma(closes, 14)
     ma14_prev = calculate_sma(closes[:-1], 14)
     
-    if None in (fast, slow, fast_prev, slow_prev, rsi, rsi_prev, atr, ma14, ma14_prev):
+    # 👈 3. تعديل استباقي لمنع خطأ Pandas (The truth value of a Series is ambiguous)
+    if fast is None or slow is None or rsi is None or atr is None or ma14 is None:
         return
 
     latest = entry_candles[-1]
