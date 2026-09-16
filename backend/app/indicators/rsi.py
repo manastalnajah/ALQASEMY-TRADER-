@@ -1,23 +1,34 @@
 import pandas as pd
-from .atr import calculate_wilders_rma
 
-def calculate_rsi(df: pd.DataFrame, column: str = 'close', period: int = 14) -> pd.Series:
+def calculate_rsi(data, column='close', period=14):
     """
-    حساب مؤشر القوة النسبية (RSI) بدقة MT5 باستخدام Pandas وتنعيم وايلدر (RMA)
+    حساب مؤشر القوة النسبية (RSI) بدعم كامل وآمن لـ DataFrames و Series و Lists
     """
-    delta = df[column].diff()
+    # 1. 🛡️ الجدار الدفاعي: تصحيح المتغيرات إذا تم تمرير (14) بدلاً من اسم العمود
+    if isinstance(column, int):
+        period = column
+        column = 'close'
+        
+    # 2. 🛡️ توحيد نوع البيانات إلى Pandas Series بأمان تام
+    if isinstance(data, list):
+        s = pd.Series(data)
+    elif isinstance(data, pd.DataFrame):
+        s = data[column]
+    elif isinstance(data, pd.Series):
+        s = data
+    else:
+        return 50.0  # قيمة محايدة لحماية البوت من التوقف في حال وجود بيانات غير صالحة
+
+    # 3. حساب الـ RSI
+    delta = s.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
     
-    # فصل المكاسب عن الخسائر
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    # تنعيم القيم باستخدام المتوسط الأسي
+    ema_up = up.ewm(com=period - 1, adjust=False).mean()
+    ema_down = down.ewm(com=period - 1, adjust=False).mean()
     
-    # تطبيق تنعيم وايلدر الأساسي للمطابقة مع الميتاتريدر
-    avg_gain = calculate_wilders_rma(gain, period)
-    avg_loss = calculate_wilders_rma(loss, period)
-    
-    # حساب قيمة RS و RSI
-    rs = avg_gain / avg_loss
+    rs = ema_up / ema_down
     rsi = 100 - (100 / (1 + rs))
     
-    # معالجة حالات القسمة على صفر أو القيم المفقودة
-    return rsi.fillna(100).where(avg_loss != 0, 100.0)
+    return rsi
