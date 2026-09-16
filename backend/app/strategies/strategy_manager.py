@@ -1,21 +1,13 @@
 from app.strategies.base_strategy import BaseStrategy
-from app.strategies.scalping_strategy import ScalpingStrategy
-from app.strategies.ma_crossover_strategy import MACrossoverStrategy
-from app.strategies.rsi_reversal_strategy import RSIReversalStrategy
-from app.strategies.smart_limit_strategy import SmartLimitStrategy
-from app.strategies.golden_setup import GoldenSetupStrategy  # 👈 1. استدعاء الاستراتيجية الذهبية
+from app.strategies.golden_setup import GoldenSetupStrategy
 from app.logging.logger import system_logger
-
 
 class StrategyManager:
     def __init__(self):
+        # 🔥 تم تعطيل الاستراتيجيات القديمة لمنع خطأ الـ float(Series)
+        # وإبقاء الاستراتيجية الذهبية (الوحيدة المتوافقة مع Pandas)
         self._strategies: dict[str, BaseStrategy] = {
-            "scalping": ScalpingStrategy(),
-            "crossover": MACrossoverStrategy(),
-            "ma_cross": MACrossoverStrategy(),
-            "rsi": RSIReversalStrategy(),
-            "smart_limits": SmartLimitStrategy(),
-            "golden": GoldenSetupStrategy(),  # 👈 2. تسجيلها في المانجر
+            "golden": GoldenSetupStrategy(),
         }
 
     def execute(self, strategy_name: str, market_data: dict):
