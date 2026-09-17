@@ -79,6 +79,15 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
     if not symbol or not candle_key:
         return {"status": "ignored", "decision": "HOLD", "message": "Missing identity"}
 
+    # ==================================================
+    # الحماية ضد الاستراتيجيات غير المفعلة (تمت إعادتها)
+    # ==================================================
+    if strategy_name == "smart_limits" and not config.allow_smart_limits:
+        return {"status": "ignored", "decision": "HOLD", "message": "Smart limits disabled"}
+    if strategy_name == "scalping" and not config.allow_scalping:
+        return {"status": "ignored", "decision": "HOLD", "message": "Scalping disabled"}
+    # ==================================================
+
     try:
         result = strategy_manager.execute(strategy_name, market_data)
         
