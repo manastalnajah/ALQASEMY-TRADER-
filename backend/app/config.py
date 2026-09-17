@@ -47,15 +47,15 @@ class TradingConfig:
     candle_sync_batch_size: int = _int("CANDLE_SYNC_BATCH_SIZE", 1000)
 
     enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "golden").split(",") if s.strip())
+    
     # ==========================================
     # 🚨 إعدادات إدارة رأس المال والاختبار
     # ==========================================
-    risk_per_trade_pct: float = _float("RISK_PER_TRADE_PCT", 0.5)  # 0.5% مخاطرة فقط من رأس المال للصفقة
-    max_open_positions: int = _int("MAX_OPEN_POSITIONS", 50)       # فتح المجال لـ 50 صفقة للاختبار
+    risk_per_trade_pct: float = _float("RISK_PER_TRADE_PCT", 0.5)
+    max_open_positions: int = _int("MAX_OPEN_POSITIONS", 50)
     max_pending_orders: int = _int("MAX_PENDING_ORDERS", 50)
-    max_symbol_exposure_lots: float = _float("MAX_SYMBOL_EXPOSURE_LOTS", 2.0)  # أقصى لوت متراكم للزوج
+    max_symbol_exposure_lots: float = _float("MAX_SYMBOL_EXPOSURE_LOTS", 2.0)
     
-    # تعطيل الإيقاف اليومي للاختبار المستمر
     max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 100.0) 
     max_drawdown_pct: float = _float("MAX_DRAWDOWN_PCT", 100.0)
     
@@ -63,7 +63,6 @@ class TradingConfig:
     max_margin_usage_pct: float = _float("MAX_MARGIN_USAGE_PCT", 50.0)
     account_stale_seconds: int = _int("ACCOUNT_STALE_SECONDS", 120)
     
-    # تقليل الانتظار لالتقاط الإشارات بشكل أسرع
     signal_cooldown_minutes: int = _int("SIGNAL_COOLDOWN_MINUTES", 1) 
     pending_expiry_minutes: int = _int("PENDING_EXPIRY_MINUTES", 60)
 
@@ -71,11 +70,28 @@ class TradingConfig:
     # 🎯 إعدادات الاستراتيجية والوقف والأهداف
     # ==========================================
     atr_period: int = _int("ATR_PERIOD", 14)
-    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 4.0)  # توسيع الوقف ليصبح 4 أضعاف التذبذب (آمن جداً)
-    reward_risk: float = _float("REWARD_RISK", 1.5)              # الهدف مرة ونصف مسافة الوقف
+    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 2.5)  # تعديل طفيف لمنع الوقف من الابتعاد المفرط
+    reward_risk: float = _float("REWARD_RISK", 1.5)
     
-    max_spread_points: float = _float("MAX_SPREAD_POINTS", 30.0)
+    # تم رفع السبريد المسموح إلى 350 لضمان عدم رفض صفقات الذهب
+    max_spread_points: float = _float("MAX_SPREAD_POINTS", 350.0)
 
+    # ==========================================
+    # 🧠 إعدادات الاستراتيجيات (هنا كان سبب الانهيار)
+    # ==========================================
+    # Golden Setup
+    golden_ema_period: int = _int("GOLDEN_EMA_PERIOD", 200)
+    golden_rsi_period: int = _int("GOLDEN_RSI_PERIOD", 14)
+    golden_adx_threshold: float = _float("GOLDEN_ADX_THRESHOLD", 25.0)
+    golden_max_ema_distance: float = _float("GOLDEN_MAX_EMA_DISTANCE", 0.015) 
+    
+    # RSI Reversion
+    rsi_oversold_level: float = _float("RSI_OVERSOLD_LEVEL", 30.0)
+    rsi_overbought_level: float = _float("RSI_OVERBOUGHT_LEVEL", 70.0)
+
+    # ==========================================
+    # 🔐 مفاتيح الاتصال
+    # ==========================================
     allow_smart_limits: bool = os.getenv("ALLOW_SMART_LIMITS", "false").lower() == "true"
     allow_scalping: bool = os.getenv("ALLOW_SCALPING", "false").lower() == "true"
     mt5_api_key: str = os.getenv("MT5_API_KEY", "")
