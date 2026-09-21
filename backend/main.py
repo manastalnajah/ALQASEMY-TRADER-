@@ -41,15 +41,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-allowed_origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
+# ------------------------------------------------------------
+# إعدادات CORS المتوافقة مع Flutter Web وDio
+# ------------------------------------------------------------
+raw_origins = os.getenv("CORS_ORIGINS", "*").strip()
+if not raw_origins or raw_origins == "*":
+    allowed_origins = ["*"]
+else:
+    allowed_origins = [x.strip() for x in raw_origins.split(",") if x.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
-    allow_headers=["Content-Type", "X-MT5-Key", "X-Control-Key"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 app.add_middleware(PerformanceMiddleware)
+
+# ------------------------------------------------------------
+# توجيه المسارات (Routers)
+# ------------------------------------------------------------
 app.include_router(trades_router)
 app.include_router(bot_router)
 app.include_router(mt5_router)
@@ -57,7 +70,11 @@ app.include_router(mt5_router)
 
 @app.get("/")
 def read_root():
-    return {"message": "Alqasemy Trader API", "status": "active", "mode": "strict-rule-based"}
+    return {
+        "message": "Alqasemy Trader API",
+        "status": "active",
+        "mode": "strict-rule-based",
+    }
 
 
 @app.get("/health")
@@ -67,5 +84,6 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, workers=1)
