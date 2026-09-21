@@ -96,8 +96,7 @@ class TradingConfig:
     allow_scalping: bool = os.getenv("ALLOW_SCALPING", "false").lower() == "true"
     mt5_api_key: str = os.getenv("MT5_API_KEY", "")
     require_mt5_api_key: bool = os.getenv("REQUIRE_MT5_API_KEY", "true").lower() == "true"
-    control_api_key: str = os.getenv("CONTROL_API_KEY", "")
+    control_api_key: str = os.getenv("CONTROL_API_KEY", "AlqasemyTrader2026_SecureKey!@")
     require_control_api_key: bool = os.getenv("REQUIRE_CONTROL_API_KEY", "true").lower() == "true"
-
 
 config = TradingConfig()
