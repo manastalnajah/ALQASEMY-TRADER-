@@ -41,9 +41,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ------------------------------------------------------------
-# إعدادات CORS المتوافقة مع Flutter Web وDio
-# ------------------------------------------------------------
+# 1. إضافة الـ Middleware الداخلية أولاً
+app.add_middleware(PerformanceMiddleware)
+
+# 2. إضافة الـ CORS Middleware في النهاية لتكون هي الغطاء الخارجي الأول للطلبات
 raw_origins = os.getenv("CORS_ORIGINS", "*").strip()
 if not raw_origins or raw_origins == "*":
     allowed_origins = ["*"]
@@ -53,16 +54,13 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_credentials=False,  # تم التعديل لمنع حظر المتصفح عند استخدام "*"
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-app.add_middleware(PerformanceMiddleware)
-
-# ------------------------------------------------------------
-# توجيه المسارات (Routers)
-# ------------------------------------------------------------
+# توجيه المسارات
 app.include_router(trades_router)
 app.include_router(bot_router)
 app.include_router(mt5_router)
