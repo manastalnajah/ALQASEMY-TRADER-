@@ -54,13 +54,27 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=False,  # تم التعديل لمنع حظر المتصفح عند استخدام "*"
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    allow_headers=[
+        "Content-Type",
+        "Accept",
+        "Authorization",
+        "X-Control-Key",
+        "X-MT5-Key",
+    ],
+    expose_headers=[
+        "Content-Type",
+        "Accept",
+        "Authorization",
+        "X-Control-Key",
+        "X-MT5-Key",
+    ],
 )
 
-# توجيه المسارات
+# ------------------------------------------------------------
+# توجيه المسارات (Routers)
+# ------------------------------------------------------------
 app.include_router(trades_router)
 app.include_router(bot_router)
 app.include_router(mt5_router)
