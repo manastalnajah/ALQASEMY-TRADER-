@@ -2,20 +2,10 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
 from sqlalchemy import text
-from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from app.config import config
-from app.domain.schemas import (
-    AccountHeartbeat,
-    CandleItem,
-    CandlesSyncRequest,
-    PositionSyncItem,
-    PendingOrderSyncItem,
-    SymbolSpecSyncItem,
-    CommandResponse,
-    ExecutionReportItem,
-)
+from app.domain import schemas
 from app.services.strategy_evaluator import evaluate_and_execute_strategy
 
 logger = logging.getLogger("mt5_router")
@@ -37,14 +27,14 @@ def _authorize(x_mt5_key: Optional[str]):
             raise HTTPException(401, "Invalid or missing MT5 authentication key")
 
 
-def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: CandleItem, ea_id: str):
+def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schemas.CandleItem, ea_id: str):
     """
     تقييم الاستراتيجية بالخلفية وتوليد أوامر التداول.
     يتم تمرير الرصيد والسيولة ومواصفات العقد لحساب اللوت بدقة.
     """
     db = SessionLocal()
     try:
-        # 1. التحقق من حالة تشغيل البوت العامة (هل البوت في حالة running؟)
+        # 1. التحقق من حالة تشغيل البوت العامة
         bot_state_record = db.execute(
             text("SELECT is_running FROM bot_state WHERE id = 1 LIMIT 1")
         ).mappings().first()
@@ -63,7 +53,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: Candl
             {"ea_id": ea_id}
         ).mappings().first()
 
-        # كحل احتياطي: إذا لم يتطابق ea_id بالضبط، نسحب أول حساب تداول نشط
+        # بديل احتياطي: إذا لم يتطابق ea_id بالضبط، نسحب أول حساب تداول نشط
         if not account:
             account = db.execute(
                 text("""
@@ -80,7 +70,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: Candl
 
         account_id = str(account["id"])
 
-        # 3. جلب مواصفات الرمز (Tick Size / Tick Value) لحساب حجم العقد بدقة
+        # 3. جلب مواصفات الرمز لحساب حجم العقد بدقة
         spec = db.execute(
             text("SELECT tick_size, tick_value, point, digits FROM symbol_specs WHERE symbol = :sym LIMIT 1"),
             {"sym": symbol}
@@ -89,7 +79,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: Candl
         tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
         tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
 
-        # 4. بناء كائن بيانات السوق المكتمل بالرصيد والسيولة والمواصفات
+        # 4. بناء بيانات السوق مع الرصيد والمواصفات
         market_data = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -107,10 +97,8 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: Candl
             "candle_key": str(latest_candle.open_time),
         }
 
-        # 5. تحديد الاستراتيجية المعتمدة (الافتراضية: golden_setup)
         strategy_to_run = getattr(config, "default_strategy", "golden_setup")
 
-        # 6. استدعاء محرك التقييم والتنفيذ
         result = evaluate_and_execute_strategy(
             db=db,
             account_id=account_id,
@@ -133,7 +121,10 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: Candl
 # ─── 1. Account Sync ──────────────────────────────────────────────────────────
 
 @router.post("/account/sync")
-async def sync_account(account_data: AccountHeartbeat, x_mt5_key: Optional[str] = Header(default=None)):
+async def sync_account(
+    account_data: schemas.AccountHeartbeat, 
+    x_mt5_key: Optional[str] = Header(default=None)
+):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
@@ -142,7 +133,6 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: Optional[str] 
         )
         server_name = account_data.server or "unknown"
 
-        # 1. تحديث الحساب المسجل مسبقاً بناءً على رقم الحساب account_number
         result = db.execute(text("""
             UPDATE trading_accounts 
             SET balance = CAST(:balance AS NUMERIC),
@@ -179,7 +169,6 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: Optional[str] 
             "account": account_data.account_number,
         }).first()
 
-        # 2. إذا لم يكن الحساب مضافاً، ننشئه كحساب جديد
         if not result:
             db.execute(text("""
                 INSERT INTO trading_accounts(
@@ -235,7 +224,10 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: Optional[str] 
 # ─── 2. Heartbeat ─────────────────────────────────────────────────────────────
 
 @router.post("/heartbeat")
-async def account_heartbeat(account_data: AccountHeartbeat, x_mt5_key: Optional[str] = Header(default=None)):
+async def account_heartbeat(
+    account_data: schemas.AccountHeartbeat, 
+    x_mt5_key: Optional[str] = Header(default=None)
+):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
@@ -284,7 +276,7 @@ async def account_heartbeat(account_data: AccountHeartbeat, x_mt5_key: Optional[
 
 @router.post("/candles/sync")
 async def sync_candles(
-    req: CandlesSyncRequest,
+    req: schemas.CandlesSyncRequest,
     background_tasks: BackgroundTasks,
     x_mt5_key: Optional[str] = Header(default=None)
 ):
@@ -294,7 +286,6 @@ async def sync_candles(
 
     db = SessionLocal()
     try:
-        # إدخال الشموع وحفظها
         for candle in req.candles:
             db.execute(text("""
                 INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
@@ -318,7 +309,6 @@ async def sync_candles(
             })
         db.commit()
 
-        # تشغيل تقييم الاستراتيجية في الخلفية على أحدث شمعة
         latest = req.candles[-1]
         background_tasks.add_task(
             run_strategy_in_background,
@@ -371,31 +361,31 @@ async def check_candles_status(
 
 @router.post("/positions/sync")
 async def sync_positions(
-    positions: List[PositionSyncItem],
+    req: schemas.PositionsSyncRequest,
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
         db.execute(text("TRUNCATE TABLE open_positions"))
-        for pos in positions:
+        for pos in req.positions:
             db.execute(text("""
                 INSERT INTO open_positions (ticket, symbol, position_type, volume, open_price, current_price, sl, tp, profit, open_time, updated_at)
                 VALUES (:ticket, :sym, :type, :vol, :open_p, :curr_p, :sl, :tp, :profit, :open_time, NOW())
             """), {
                 "ticket": pos.ticket,
                 "sym": pos.symbol,
-                "type": pos.type,
+                "type": pos.side,
                 "vol": pos.volume,
-                "open_p": pos.open_price,
-                "curr_p": pos.current_price,
-                "sl": pos.sl,
-                "tp": pos.tp,
+                "open_p": pos.price_open,
+                "curr_p": pos.price_open,
+                "sl": pos.stop_loss,
+                "tp": pos.take_profit,
                 "profit": pos.profit,
-                "open_time": pos.open_time,
+                "open_time": pos.updated_at or text("NOW()"),
             })
         db.commit()
-        return {"status": "success", "count": len(positions)}
+        return {"status": "success", "count": len(req.positions)}
     except Exception as exc:
         db.rollback()
         logger.exception("Positions sync failed: %s", exc)
@@ -408,29 +398,29 @@ async def sync_positions(
 
 @router.post("/pending-orders/sync")
 async def sync_pending_orders(
-    orders: List[PendingOrderSyncItem],
+    req: schemas.PendingOrdersSyncRequest,
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
         db.execute(text("TRUNCATE TABLE pending_orders"))
-        for o in orders:
+        for o in req.orders:
             db.execute(text("""
                 INSERT INTO pending_orders (ticket, symbol, order_type, volume, price, sl, tp, open_time, updated_at)
                 VALUES (:ticket, :sym, :type, :vol, :price, :sl, :tp, :open_time, NOW())
             """), {
                 "ticket": o.ticket,
                 "sym": o.symbol,
-                "type": o.type,
+                "type": o.side,
                 "vol": o.volume,
-                "price": o.price,
-                "sl": o.sl,
-                "tp": o.tp,
-                "open_time": o.open_time,
+                "price": o.price_open,
+                "sl": o.stop_loss,
+                "tp": o.take_profit,
+                "open_time": o.updated_at or text("NOW()"),
             })
         db.commit()
-        return {"status": "success", "count": len(orders)}
+        return {"status": "success", "count": len(req.orders)}
     except Exception as exc:
         db.rollback()
         logger.exception("Pending orders sync failed: %s", exc)
@@ -443,7 +433,7 @@ async def sync_pending_orders(
 
 @router.post("/specs/sync")
 async def sync_symbol_specs(
-    specs: List[SymbolSpecSyncItem],
+    specs: List[schemas.SymbolSpecSync],
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
@@ -451,12 +441,11 @@ async def sync_symbol_specs(
     try:
         for s in specs:
             db.execute(text("""
-                INSERT INTO symbol_specs (symbol, point, digits, spread, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
-                VALUES (:sym, :point, :digits, :spread, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
+                INSERT INTO symbol_specs (symbol, point, digits, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
+                VALUES (:sym, :point, :digits, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
                 ON CONFLICT (symbol) DO UPDATE SET
                     point = EXCLUDED.point,
                     digits = EXCLUDED.digits,
-                    spread = EXCLUDED.spread,
                     tick_value = EXCLUDED.tick_value,
                     tick_size = EXCLUDED.tick_size,
                     contract_size = EXCLUDED.contract_size,
@@ -468,13 +457,12 @@ async def sync_symbol_specs(
                 "sym": s.symbol,
                 "point": s.point,
                 "digits": s.digits,
-                "spread": s.spread,
                 "tv": s.tick_value,
                 "ts": s.tick_size,
                 "cs": s.contract_size,
-                "min_l": s.min_lot,
-                "max_l": s.max_lot,
-                "step": s.lot_step,
+                "min_l": s.volume_min,
+                "max_l": s.volume_max,
+                "step": s.volume_step,
             })
         db.commit()
         return {"status": "success", "count": len(specs)}
@@ -486,7 +474,7 @@ async def sync_symbol_specs(
         db.close()
 
 
-# ─── 8. Commands Queue & Execution Reports ────────────────────────────────────
+# ─── 8. Commands Polling & Execution Report ───────────────────────────────────
 
 @router.get("/commands")
 async def get_pending_commands(
@@ -498,7 +486,7 @@ async def get_pending_commands(
     db = SessionLocal()
     try:
         rows = db.execute(text("""
-            SELECT id, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id
+            SELECT id, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id, strategy_name, signal_key, created_at
             FROM trade_commands
             WHERE status = 'pending'
               AND (CAST(:ea_id AS TEXT) IS NULL OR ea_id = '' OR ea_id = CAST(:ea_id AS TEXT))
@@ -510,13 +498,19 @@ async def get_pending_commands(
         for r in rows:
             commands.append({
                 "id": str(r["id"]),
+                "command_id": str(r["id"]),
                 "symbol": r["symbol"],
                 "order_type": r["order_type"],
-                "lot_size": float(r["lot_size"]),
-                "entry_price": float(r["entry_price"]) if r["entry_price"] else None,
-                "stop_loss": float(r["stop_loss"]) if r["stop_loss"] else None,
-                "take_profit": float(r["take_profit"]) if r["take_profit"] else None,
-                "ea_id": r["ea_id"]
+                "side": r["order_type"],
+                "volume": float(r["lot_size"]),
+                "entry_price": float(r["entry_price"]) if r["entry_price"] else 0.0,
+                "sl": float(r["stop_loss"]) if r["stop_loss"] else 0.0,
+                "tp": float(r["take_profit"]) if r["take_profit"] else 0.0,
+                "status": "pending",
+                "strategy_name": r["strategy_name"] or "",
+                "signal_key": r["signal_key"] or "",
+                "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+                "ea_id": r["ea_id"] or ""
             })
         return commands
     finally:
@@ -525,13 +519,14 @@ async def get_pending_commands(
 
 @router.post("/reports")
 async def report_execution(
-    reports: List[ExecutionReportItem],
+    reports: List[schemas.CommandReportRequest],
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
         for rep in reports:
+            ticket = rep.mt5_ticket or rep.mt5_order_ticket or rep.mt5_deal_ticket
             db.execute(text("""
                 UPDATE trade_commands
                 SET status = :status,
@@ -541,9 +536,9 @@ async def report_execution(
                 WHERE id = CAST(:cmd_id AS UUID)
             """), {
                 "status": rep.status,
-                "ticket": rep.ticket,
+                "ticket": ticket,
                 "err": rep.error_message or "",
-                "cmd_id": rep.command_id
+                "cmd_id": rep.command_id if hasattr(rep, "command_id") else None
             })
         db.commit()
         return {"status": "success", "count": len(reports)}
