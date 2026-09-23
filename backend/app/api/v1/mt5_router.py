@@ -1,6 +1,6 @@
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, BackgroundTasks, Request
 from sqlalchemy import text
 
 from database import SessionLocal
@@ -433,12 +433,15 @@ async def sync_pending_orders(
 
 @router.post("/specs/sync")
 async def sync_symbol_specs(
-    specs_data: dict | list,  # ⬅️ التعديل هنا: قبول قاموس أو قائمة لتجنب خطأ 422
+    request: Request,  # تجاوز فحص Pydantic لضمان عدم ظهور خطأ 422
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
+        # قراءة الـ JSON الخام مباشرة من الإكسبيرت
+        specs_data = await request.json()
+        
         # توحيد البيانات لتصبح قائمة دائماً حتى لو أرسل الإكسبيرت كائناً واحداً
         specs = specs_data if isinstance(specs_data, list) else [specs_data]
         
@@ -496,6 +499,8 @@ async def sync_symbol_specs(
         raise HTTPException(500, "Specs synchronization failed")
     finally:
         db.close()
+
+
 # ─── 8. Commands Polling & Execution Report ───────────────────────────────────
 
 @router.get("/commands")
