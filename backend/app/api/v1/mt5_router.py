@@ -243,10 +243,10 @@ def account_heartbeat(
         db.close()
 
 
-# ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد) ──────────────────────────
+# ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد والاختناق) ───────────────
 
 def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
-    """هذه الدالة تعمل في الخلفية لإدخال الشموع دون تعطيل استجابة السيرفر"""
+    """هذه الدالة تعمل في الخلفية لإدخال الشموع على دفعات لحماية قاعدة البيانات من الـ Timeout"""
     db = SessionLocal()
     try:
         parameters = [{
@@ -260,19 +260,24 @@ def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str)
             "v": candle.volume
         } for candle in req.candles]
 
-        db.execute(text("""
-            INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
-            VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
-            ON CONFLICT (symbol_name, timeframe, open_time) 
-            DO UPDATE SET 
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume
-        """), parameters)
-        db.commit()
+        # 🛠️ تقسيم البيانات إلى حزم صغيرة (100 شمعة لكل حزمة) لتجنب Statement Timeout
+        chunk_size = 100
+        for i in range(0, len(parameters), chunk_size):
+            chunk = parameters[i:i + chunk_size]
+            db.execute(text("""
+                INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
+                VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
+                ON CONFLICT (symbol_name, timeframe, open_time) 
+                DO UPDATE SET 
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """), chunk)
+            db.commit() # حفظ كل حزمة بشكل مستقل
 
+        # تشغيل الاستراتيجية بعد اكتمال حفظ جميع الحزم
         latest = req.candles[-1]
         run_strategy_in_background(
             symbol=req.symbol,
@@ -285,27 +290,6 @@ def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str)
         logger.exception("Background Candles sync failed: %s", exc)
     finally:
         db.close()
-
-@router.post("/candles/sync")
-def sync_candles(
-    req: schemas.CandlesSyncRequest,
-    background_tasks: BackgroundTasks,
-    x_mt5_key: Optional[str] = Header(default=None)
-):
-    _authorize(x_mt5_key)
-    if not req.candles:
-        return {"status": "ignored", "count": 0}
-
-    # استخراج ea_id لتمريره للمهمة الخلفية
-    ea_id = req.ea_id or "MT5-ALQASEMY-01"
-    
-    # إرسال العملية الثقيلة إلى الخلفية للعمل بشكل مستقل
-    background_tasks.add_task(process_candles_background_task, req, ea_id)
-    
-    # الرد فوراً في نفس اللحظة بـ 200 OK للإكسبيرت لكي لا يقطع الاتصال أبداً
-    return {"status": "success", "count": len(req.candles), "message": "processing in background"}
-
-
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
 
 @router.get("/candles/status")
