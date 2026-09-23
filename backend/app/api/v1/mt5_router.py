@@ -243,18 +243,10 @@ def account_heartbeat(
         db.close()
 
 
-# ─── 3. Candles Sync ──────────────────────────────────────────────────────────
+# ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد) ──────────────────────────
 
-@router.post("/candles/sync")
-def sync_candles(
-    req: schemas.CandlesSyncRequest,
-    background_tasks: BackgroundTasks,
-    x_mt5_key: Optional[str] = Header(default=None)
-):
-    _authorize(x_mt5_key)
-    if not req.candles:
-        return {"status": "ignored", "count": 0}
-
+def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
+    """هذه الدالة تعمل في الخلفية لإدخال الشموع دون تعطيل استجابة السيرفر"""
     db = SessionLocal()
     try:
         parameters = [{
@@ -282,16 +274,36 @@ def sync_candles(
         db.commit()
 
         latest = req.candles[-1]
-        background_tasks.add_task(
-            run_strategy_in_background,
+        run_strategy_in_background(
             symbol=req.symbol,
             timeframe=req.timeframe,
             latest_candle=latest,
-            ea_id=req.ea_id or "MT5-ALQASEMY-01"
+            ea_id=ea_id
         )
-        return {"status": "success", "count": len(req.candles)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Background Candles sync failed: %s", exc)
     finally:
         db.close()
+
+@router.post("/candles/sync")
+def sync_candles(
+    req: schemas.CandlesSyncRequest,
+    background_tasks: BackgroundTasks,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    if not req.candles:
+        return {"status": "ignored", "count": 0}
+
+    # استخراج ea_id لتمريره للمهمة الخلفية
+    ea_id = req.ea_id or "MT5-ALQASEMY-01"
+    
+    # إرسال العملية الثقيلة إلى الخلفية للعمل بشكل مستقل
+    background_tasks.add_task(process_candles_background_task, req, ea_id)
+    
+    # الرد فوراً في نفس اللحظة بـ 200 OK للإكسبيرت لكي لا يقطع الاتصال أبداً
+    return {"status": "success", "count": len(req.candles), "message": "processing in background"}
 
 
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
@@ -388,7 +400,7 @@ def sync_pending_orders(
         db.close()
 
 
-# ─── 7. Symbol Specs Sync (Robust Handler preventing 422 errors) ─────────────
+# ─── 7. Symbol Specs Sync ─────────────────────────────────────────────────────
 
 @router.post("/specs/sync")
 def sync_symbol_specs(
@@ -398,7 +410,6 @@ def sync_symbol_specs(
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
-        # قراءة البيانات الخام بشكل مرن تماماً لتجنب أي خطأ 422
         import asyncio
         try:
             raw_json = asyncio.run(request.json())
