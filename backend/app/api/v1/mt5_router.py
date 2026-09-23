@@ -433,13 +433,33 @@ async def sync_pending_orders(
 
 @router.post("/specs/sync")
 async def sync_symbol_specs(
-    specs: List[schemas.SymbolSpecSync],
+    specs_data: dict | list,  # ⬅️ التعديل هنا: قبول قاموس أو قائمة لتجنب خطأ 422
     x_mt5_key: Optional[str] = Header(default=None)
 ):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
+        # توحيد البيانات لتصبح قائمة دائماً حتى لو أرسل الإكسبيرت كائناً واحداً
+        specs = specs_data if isinstance(specs_data, list) else [specs_data]
+        
+        count = 0
         for s in specs:
+            symbol = str(s.get("symbol", ""))
+            if not symbol:
+                continue
+                
+            point = float(s.get("point", 0.00001))
+            digits = int(s.get("digits", 5))
+            spread = int(s.get("spread", 0))
+            
+            tick_value = float(s.get("tick_value", 1.0))
+            tick_size = float(s.get("tick_size", 0.00001))
+            contract_size = float(s.get("contract_size", 100000.0))
+            
+            min_lot = float(s.get("min_lot") or s.get("volume_min") or 0.01)
+            max_lot = float(s.get("max_lot") or s.get("volume_max") or 100.0)
+            lot_step = float(s.get("lot_step") or s.get("volume_step") or 0.01)
+
             db.execute(text("""
                 INSERT INTO symbol_specs (symbol, point, digits, spread, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
                 VALUES (:sym, :point, :digits, :spread, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
@@ -455,19 +475,21 @@ async def sync_symbol_specs(
                     lot_step = EXCLUDED.lot_step,
                     updated_at = NOW()
             """), {
-                "sym": s.symbol,
-                "point": s.point,
-                "digits": s.digits,
-                "spread": s.spread,
-                "tv": s.tick_value,
-                "ts": s.tick_size,
-                "cs": s.contract_size,
-                "min_l": s.min_lot,
-                "max_l": s.max_lot,
-                "step": s.lot_step,
+                "sym": symbol,
+                "point": point,
+                "digits": digits,
+                "spread": spread,
+                "tv": tick_value,
+                "ts": tick_size,
+                "cs": contract_size,
+                "min_l": min_lot,
+                "max_l": max_lot,
+                "step": lot_step,
             })
+            count += 1
+            
         db.commit()
-        return {"status": "success", "count": len(specs)}
+        return {"status": "success", "count": count}
     except Exception as exc:
         db.rollback()
         logger.exception("Specs sync failed: %s", exc)
