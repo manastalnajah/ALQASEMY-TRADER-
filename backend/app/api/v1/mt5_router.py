@@ -1,5 +1,139 @@
+import logging
+from typing import List, Optional
+from fastapi import APIRouter, Header, HTTPException, BackgroundTasks
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from database import SessionLocal
+from app.config import config
+from app.domain.schemas import (
+    AccountHeartbeat,
+    CandleItem,
+    CandlesSyncRequest,
+    PositionSyncItem,
+    PendingOrderSyncItem,
+    SymbolSpecSyncItem,
+    CommandResponse,
+    ExecutionReportItem,
+)
+from app.services.strategy_evaluator import evaluate_and_execute_strategy
+
+logger = logging.getLogger("mt5_router")
+
+router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 Gateway"])
+
+
+def _authorize(x_mt5_key: Optional[str]):
+    """التحقق من صحة مفتاح التواصل القادم من MT5/Cloudzy"""
+    if config.require_control_api_key:
+        valid_keys = [
+            k for k in [
+                getattr(config, "mt5_api_key", None),
+                getattr(config, "control_api_key", None),
+                "AlqasemyTrader2026_SecureKey!@"
+            ] if k
+        ]
+        if not x_mt5_key or x_mt5_key not in valid_keys:
+            raise HTTPException(401, "Invalid or missing MT5 authentication key")
+
+
+def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: CandleItem, ea_id: str):
+    """
+    تقييم الاستراتيجية بالخلفية وتوليد أوامر التداول.
+    يتم تمرير الرصيد والسيولة ومواصفات العقد لحساب اللوت بدقة.
+    """
+    db = SessionLocal()
+    try:
+        # 1. التحقق من حالة تشغيل البوت العامة (هل البوت في حالة running؟)
+        bot_state_record = db.execute(
+            text("SELECT is_running FROM bot_state WHERE id = 1 LIMIT 1")
+        ).mappings().first()
+
+        if bot_state_record and not bot_state_record["is_running"]:
+            return
+
+        # 2. جلب الحساب المرتبط بمعرف الإكسبيرت النشط
+        account = db.execute(
+            text("""
+                SELECT id, account_number, balance, equity, currency 
+                FROM trading_accounts 
+                WHERE ea_id = :ea_id AND is_active = true AND is_trade_allowed = true
+                ORDER BY updated_at DESC LIMIT 1
+            """),
+            {"ea_id": ea_id}
+        ).mappings().first()
+
+        # كحل احتياطي: إذا لم يتطابق ea_id بالضبط، نسحب أول حساب تداول نشط
+        if not account:
+            account = db.execute(
+                text("""
+                    SELECT id, account_number, balance, equity, currency 
+                    FROM trading_accounts 
+                    WHERE is_active = true AND is_trade_allowed = true
+                    ORDER BY updated_at DESC LIMIT 1
+                """)
+            ).mappings().first()
+
+        if not account:
+            logger.warning(f"⚠️ No active trading account available for EA '{ea_id}'. Strategy execution skipped.")
+            return
+
+        account_id = str(account["id"])
+
+        # 3. جلب مواصفات الرمز (Tick Size / Tick Value) لحساب حجم العقد بدقة
+        spec = db.execute(
+            text("SELECT tick_size, tick_value, point, digits FROM symbol_specs WHERE symbol = :sym LIMIT 1"),
+            {"sym": symbol}
+        ).mappings().first()
+
+        tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
+        tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
+
+        # 4. بناء كائن بيانات السوق المكتمل بالرصيد والسيولة والمواصفات
+        market_data = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "open_time": str(latest_candle.open_time),
+            "open": float(latest_candle.open),
+            "high": float(latest_candle.high),
+            "low": float(latest_candle.low),
+            "close": float(latest_candle.close),
+            "volume": float(latest_candle.volume),
+            "balance": float(account["balance"] or 10000.0),
+            "equity": float(account["equity"] or 10000.0),
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "ea_id": ea_id,
+            "candle_key": str(latest_candle.open_time),
+        }
+
+        # 5. تحديد الاستراتيجية المعتمدة (الافتراضية: golden_setup)
+        strategy_to_run = getattr(config, "default_strategy", "golden_setup")
+
+        # 6. استدعاء محرك التقييم والتنفيذ
+        result = evaluate_and_execute_strategy(
+            db=db,
+            account_id=account_id,
+            strategy_name=strategy_to_run,
+            market_data=market_data,
+        )
+
+        decision = result.get("decision", "HOLD")
+        if decision != "HOLD":
+            logger.info(
+                f"🎯 Signal Triggered: {decision} on {symbol} | Account: {account['account_number']} | Status: {result.get('status')}"
+            )
+
+    except Exception as e:
+        logger.exception(f"❌ Background Strategy Execution error on {symbol}: {e}")
+    finally:
+        db.close()
+
+
+# ─── 1. Account Sync ──────────────────────────────────────────────────────────
+
 @router.post("/account/sync")
-async def sync_account(account_data: AccountHeartbeat, x_mt5_key: str | None = Header(default=None)):
+async def sync_account(account_data: AccountHeartbeat, x_mt5_key: Optional[str] = Header(default=None)):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
@@ -44,8 +178,8 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: str | None = H
             "ea_version": account_data.ea_version or "",
             "account": account_data.account_number,
         }).first()
-                
-        # 2. إذا لم يكن الحساب مضافاً أصلاً في جدول trading_accounts، ننشئه كحساب جديد
+
+        # 2. إذا لم يكن الحساب مضافاً، ننشئه كحساب جديد
         if not result:
             db.execute(text("""
                 INSERT INTO trading_accounts(
@@ -86,10 +220,10 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: str | None = H
                 "ea_id": account_data.ea_id or "",
                 "ea_version": account_data.ea_version or ""
             })
-            
+
         db.commit()
         return {"status": "success", "account_number": account_data.account_number}
-        
+
     except Exception as exc:
         db.rollback()
         logger.exception("Account sync failed: %s", exc)
@@ -98,8 +232,10 @@ async def sync_account(account_data: AccountHeartbeat, x_mt5_key: str | None = H
         db.close()
 
 
+# ─── 2. Heartbeat ─────────────────────────────────────────────────────────────
+
 @router.post("/heartbeat")
-async def account_heartbeat(account_data: AccountHeartbeat, x_mt5_key: str | None = Header(default=None)):
+async def account_heartbeat(account_data: AccountHeartbeat, x_mt5_key: Optional[str] = Header(default=None)):
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
@@ -140,5 +276,280 @@ async def account_heartbeat(account_data: AccountHeartbeat, x_mt5_key: str | Non
         db.rollback()
         logger.exception("Heartbeat failed: %s", exc)
         raise HTTPException(500, "Heartbeat failed")
+    finally:
+        db.close()
+
+
+# ─── 3. Candles Sync ──────────────────────────────────────────────────────────
+
+@router.post("/candles/sync")
+async def sync_candles(
+    req: CandlesSyncRequest,
+    background_tasks: BackgroundTasks,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    if not req.candles:
+        return {"status": "ignored", "count": 0}
+
+    db = SessionLocal()
+    try:
+        # إدخال الشموع وحفظها
+        for candle in req.candles:
+            db.execute(text("""
+                INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
+                VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
+                ON CONFLICT (symbol_name, timeframe, open_time) 
+                DO UPDATE SET 
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+            """), {
+                "sym": req.symbol,
+                "tf": req.timeframe,
+                "ot": candle.open_time,
+                "o": candle.open,
+                "h": candle.high,
+                "l": candle.low,
+                "c": candle.close,
+                "v": candle.volume,
+            })
+        db.commit()
+
+        # تشغيل تقييم الاستراتيجية في الخلفية على أحدث شمعة
+        latest = req.candles[-1]
+        background_tasks.add_task(
+            run_strategy_in_background,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            latest_candle=latest,
+            ea_id=req.ea_id or "MT5-ALQASEMY-01"
+        )
+
+        return {"status": "success", "count": len(req.candles)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Candles sync failed: %s", exc)
+        raise HTTPException(500, "Candles synchronization failed")
+    finally:
+        db.close()
+
+
+# ─── 4. Candles Status Check ──────────────────────────────────────────────────
+
+@router.get("/candles/status")
+async def check_candles_status(
+    symbol: str,
+    timeframe: str,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        row = db.execute(text("""
+            SELECT COUNT(*) AS total, MAX(open_time) AS latest 
+            FROM candles 
+            WHERE symbol_name = :sym AND timeframe = :tf
+        """), {"sym": symbol, "tf": timeframe}).mappings().first()
+
+        total = row["total"] if row else 0
+        latest = row["latest"] if row else None
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "count": total,
+            "latest_candle": str(latest) if latest else None,
+            "ready": total >= 200
+        }
+    finally:
+        db.close()
+
+
+# ─── 5. Positions Sync ────────────────────────────────────────────────────────
+
+@router.post("/positions/sync")
+async def sync_positions(
+    positions: List[PositionSyncItem],
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        db.execute(text("TRUNCATE TABLE open_positions"))
+        for pos in positions:
+            db.execute(text("""
+                INSERT INTO open_positions (ticket, symbol, position_type, volume, open_price, current_price, sl, tp, profit, open_time, updated_at)
+                VALUES (:ticket, :sym, :type, :vol, :open_p, :curr_p, :sl, :tp, :profit, :open_time, NOW())
+            """), {
+                "ticket": pos.ticket,
+                "sym": pos.symbol,
+                "type": pos.type,
+                "vol": pos.volume,
+                "open_p": pos.open_price,
+                "curr_p": pos.current_price,
+                "sl": pos.sl,
+                "tp": pos.tp,
+                "profit": pos.profit,
+                "open_time": pos.open_time,
+            })
+        db.commit()
+        return {"status": "success", "count": len(positions)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Positions sync failed: %s", exc)
+        raise HTTPException(500, "Positions synchronization failed")
+    finally:
+        db.close()
+
+
+# ─── 6. Pending Orders Sync ───────────────────────────────────────────────────
+
+@router.post("/pending-orders/sync")
+async def sync_pending_orders(
+    orders: List[PendingOrderSyncItem],
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        db.execute(text("TRUNCATE TABLE pending_orders"))
+        for o in orders:
+            db.execute(text("""
+                INSERT INTO pending_orders (ticket, symbol, order_type, volume, price, sl, tp, open_time, updated_at)
+                VALUES (:ticket, :sym, :type, :vol, :price, :sl, :tp, :open_time, NOW())
+            """), {
+                "ticket": o.ticket,
+                "sym": o.symbol,
+                "type": o.type,
+                "vol": o.volume,
+                "price": o.price,
+                "sl": o.sl,
+                "tp": o.tp,
+                "open_time": o.open_time,
+            })
+        db.commit()
+        return {"status": "success", "count": len(orders)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Pending orders sync failed: %s", exc)
+        raise HTTPException(500, "Pending orders synchronization failed")
+    finally:
+        db.close()
+
+
+# ─── 7. Symbol Specs Sync ─────────────────────────────────────────────────────
+
+@router.post("/specs/sync")
+async def sync_symbol_specs(
+    specs: List[SymbolSpecSyncItem],
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        for s in specs:
+            db.execute(text("""
+                INSERT INTO symbol_specs (symbol, point, digits, spread, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
+                VALUES (:sym, :point, :digits, :spread, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
+                ON CONFLICT (symbol) DO UPDATE SET
+                    point = EXCLUDED.point,
+                    digits = EXCLUDED.digits,
+                    spread = EXCLUDED.spread,
+                    tick_value = EXCLUDED.tick_value,
+                    tick_size = EXCLUDED.tick_size,
+                    contract_size = EXCLUDED.contract_size,
+                    min_lot = EXCLUDED.min_lot,
+                    max_lot = EXCLUDED.max_lot,
+                    lot_step = EXCLUDED.lot_step,
+                    updated_at = NOW()
+            """), {
+                "sym": s.symbol,
+                "point": s.point,
+                "digits": s.digits,
+                "spread": s.spread,
+                "tv": s.tick_value,
+                "ts": s.tick_size,
+                "cs": s.contract_size,
+                "min_l": s.min_lot,
+                "max_l": s.max_lot,
+                "step": s.lot_step,
+            })
+        db.commit()
+        return {"status": "success", "count": len(specs)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Specs sync failed: %s", exc)
+        raise HTTPException(500, "Specs synchronization failed")
+    finally:
+        db.close()
+
+
+# ─── 8. Commands Queue & Execution Reports ────────────────────────────────────
+
+@router.get("/commands")
+async def get_pending_commands(
+    limit: int = 10,
+    ea_id: Optional[str] = None,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        rows = db.execute(text("""
+            SELECT id, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id
+            FROM trade_commands
+            WHERE status = 'pending'
+              AND (CAST(:ea_id AS TEXT) IS NULL OR ea_id = '' OR ea_id = CAST(:ea_id AS TEXT))
+            ORDER BY created_at ASC
+            LIMIT :limit
+        """), {"ea_id": ea_id, "limit": limit}).mappings().all()
+
+        commands = []
+        for r in rows:
+            commands.append({
+                "id": str(r["id"]),
+                "symbol": r["symbol"],
+                "order_type": r["order_type"],
+                "lot_size": float(r["lot_size"]),
+                "entry_price": float(r["entry_price"]) if r["entry_price"] else None,
+                "stop_loss": float(r["stop_loss"]) if r["stop_loss"] else None,
+                "take_profit": float(r["take_profit"]) if r["take_profit"] else None,
+                "ea_id": r["ea_id"]
+            })
+        return commands
+    finally:
+        db.close()
+
+
+@router.post("/reports")
+async def report_execution(
+    reports: List[ExecutionReportItem],
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        for rep in reports:
+            db.execute(text("""
+                UPDATE trade_commands
+                SET status = :status,
+                    ticket = :ticket,
+                    error_message = :err,
+                    executed_at = NOW()
+                WHERE id = CAST(:cmd_id AS UUID)
+            """), {
+                "status": rep.status,
+                "ticket": rep.ticket,
+                "err": rep.error_message or "",
+                "cmd_id": rep.command_id
+            })
+        db.commit()
+        return {"status": "success", "count": len(reports)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Report execution failed: %s", exc)
+        raise HTTPException(500, "Report execution failed")
     finally:
         db.close()
