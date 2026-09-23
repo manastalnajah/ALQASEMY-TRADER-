@@ -222,53 +222,21 @@ class CommandReportRequest(BaseModel):
 
 class SymbolSpecSync(BaseModel):
     """
-    مواصفات الرمز القادمة من MT5.
+    مواصفات الرمز القادمة من MT5 (محدثة لتطابق الإكسبيرت).
     """
-
-    symbol: str = Field(
-        min_length=1,
-        max_length=64,
-    )
-
-    digits: int = Field(
-        ge=0,
-        le=20,
-    )
-
-    point: float = Field(
-        gt=0,
-    )
-
-    tick_size: float = Field(
-        gt=0,
-    )
-
-    tick_value: float = Field(
-        ge=0,
-    )
-
-    volume_min: float = Field(
-        gt=0,
-    )
-
-    volume_max: float = Field(
-        gt=0,
-    )
-
-    volume_step: float = Field(
-        gt=0,
-    )
-
-    stops_level_points: int = Field(
-        default=0,
-        ge=0,
-    )
-
-    contract_size: float = Field(
-        default=0.0,
-        ge=0,
-    )
-
+    symbol: str = Field(min_length=1, max_length=64)
+    digits: int = Field(ge=0, le=20)
+    point: float = Field(gt=0)
+    tick_size: float = Field(gt=0)
+    tick_value: float = Field(ge=0)
+    
+    # حقول متوافقة مع الإكسبيرت بدلاً من volume_min وغيرها
+    min_lot: float = Field(default=0.01, gt=0)
+    max_lot: float = Field(default=100.0, gt=0)
+    lot_step: float = Field(default=0.01, gt=0)
+    spread: int = Field(default=0, ge=0)
+    
+    contract_size: float = Field(default=100000.0, ge=0)
 
 # ============================================================
 # ACCOUNT HEARTBEAT / SYNC
