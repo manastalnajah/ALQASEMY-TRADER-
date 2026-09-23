@@ -13,8 +13,10 @@ engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=1800,
-    pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
+    # 🛠️ تم رفع سعة الاتصالات لإنهاء خطأ QueuePool limit تماماً
+    pool_size=int(os.getenv("DB_POOL_SIZE", "40")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "60")),
+    pool_timeout=60, # 🛠️ إضافة مهلة انتظار أطول للطلبات المزدحمة
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -27,7 +29,7 @@ def initialize_database():
             conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
             conn.execute(text('CREATE EXTENSION IF NOT EXISTS pgcrypto'))
             
-            # 🛠️ استيراد النماذج بجميع مساراتها المحتملة لضمان تسجيل جدول trading_accounts وجداول الأوامر في Base.metadata
+            # استيراد النماذج بجميع مساراتها المحتملة لضمان تسجيل الجداول في Base.metadata
             try:
                 from app.domain import models  # noqa: F401
             except ImportError:
