@@ -290,6 +290,26 @@ def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str)
         logger.exception("Background Candles sync failed: %s", exc)
     finally:
         db.close()
+
+
+@router.post("/candles/sync")
+def sync_candles(
+    req: schemas.CandlesSyncRequest,
+    background_tasks: BackgroundTasks,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    if not req.candles:
+        return {"status": "ignored", "count": 0}
+
+    # استخراج ea_id لتمريره للمهمة الخلفية
+    ea_id = req.ea_id or "MT5-ALQASEMY-01"
+    
+    # إرسال العملية الثقيلة إلى الخلفية للعمل بشكل مستقل على دفعات
+    background_tasks.add_task(process_candles_background_task, req, ea_id)
+    
+    # الرد فوراً في نفس اللحظة بـ 200 OK للإكسبيرت لكي لا يقطع الاتصال أبداً
+    return {"status": "success", "count": len(req.candles), "message": "processing in background chunks"}
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
 
 @router.get("/candles/status")
