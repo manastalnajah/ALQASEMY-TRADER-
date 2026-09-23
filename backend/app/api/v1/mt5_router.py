@@ -286,29 +286,34 @@ async def sync_candles(
 
     db = SessionLocal()
     try:
-        for candle in req.candles:
-            db.execute(text("""
-                INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
-                VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
-                ON CONFLICT (symbol_name, timeframe, open_time) 
-                DO UPDATE SET 
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-            """), {
-                "sym": req.symbol,
-                "tf": req.timeframe,
-                "ot": candle.open_time,
-                "o": candle.open,
-                "h": candle.high,
-                "l": candle.low,
-                "c": candle.close,
-                "v": candle.volume,
-            })
+        # 🔥 تجهيز كل الشموع لإرسالها كدفعة واحدة (Bulk Insert) لإنهاء تأخير السيرفر
+        parameters = [{
+            "sym": req.symbol,
+            "tf": req.timeframe,
+            "ot": candle.open_time,
+            "o": candle.open,
+            "h": candle.high,
+            "l": candle.low,
+            "c": candle.close,
+            "v": candle.volume
+        } for candle in req.candles]
+
+        # تنفيذ الإدخال بضربة واحدة في قاعدة البيانات (يستغرق أجزاء من الثانية)
+        db.execute(text("""
+            INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
+            VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
+            ON CONFLICT (symbol_name, timeframe, open_time) 
+            DO UPDATE SET 
+                open = EXCLUDED.open,
+                high = EXCLUDED.high,
+                low = EXCLUDED.low,
+                close = EXCLUDED.close,
+                volume = EXCLUDED.volume
+        """), parameters)
+        
         db.commit()
 
+        # تشغيل تقييم الاستراتيجية بالخلفية
         latest = req.candles[-1]
         background_tasks.add_task(
             run_strategy_in_background,
