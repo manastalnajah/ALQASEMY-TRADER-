@@ -441,11 +441,12 @@ async def sync_symbol_specs(
     try:
         for s in specs:
             db.execute(text("""
-                INSERT INTO symbol_specs (symbol, point, digits, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
-                VALUES (:sym, :point, :digits, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
+                INSERT INTO symbol_specs (symbol, point, digits, spread, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
+                VALUES (:sym, :point, :digits, :spread, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
                 ON CONFLICT (symbol) DO UPDATE SET
                     point = EXCLUDED.point,
                     digits = EXCLUDED.digits,
+                    spread = EXCLUDED.spread,
                     tick_value = EXCLUDED.tick_value,
                     tick_size = EXCLUDED.tick_size,
                     contract_size = EXCLUDED.contract_size,
@@ -457,12 +458,13 @@ async def sync_symbol_specs(
                 "sym": s.symbol,
                 "point": s.point,
                 "digits": s.digits,
+                "spread": s.spread,
                 "tv": s.tick_value,
                 "ts": s.tick_size,
                 "cs": s.contract_size,
-                "min_l": s.volume_min,
-                "max_l": s.volume_max,
-                "step": s.volume_step,
+                "min_l": s.min_lot,
+                "max_l": s.max_lot,
+                "step": s.lot_step,
             })
         db.commit()
         return {"status": "success", "count": len(specs)}
@@ -472,8 +474,6 @@ async def sync_symbol_specs(
         raise HTTPException(500, "Specs synchronization failed")
     finally:
         db.close()
-
-
 # ─── 8. Commands Polling & Execution Report ───────────────────────────────────
 
 @router.get("/commands")
