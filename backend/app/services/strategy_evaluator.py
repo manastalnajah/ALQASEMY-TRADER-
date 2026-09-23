@@ -103,7 +103,22 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
     # ==================================================
 
     try:
-        result = strategy_manager.execute(strategy_name, market_data)
+        # 💡 [التحديث الجوهري] معالجة RSI Reversion مباشرة هنا 
+        if strategy_name == "rsi_reversion":
+            rsi = _safe_float(market_data.get("rsi"), 50.0)
+            oversold = getattr(config, "rsi_oversold_level", 30.0)
+            overbought = getattr(config, "rsi_overbought_level", 70.0)
+            
+            # اقتناص مناطق التشبع للارتداد
+            if 0 < rsi <= oversold:
+                result = {"decision": "BUY"}
+            elif rsi >= overbought:
+                result = {"decision": "SELL"}
+            else:
+                result = {"decision": "HOLD"}
+        else:
+            # تنفيذ الاستراتيجيات الأخرى المعتادة (مثل golden_setup)
+            result = strategy_manager.execute(strategy_name, market_data)
 
         decision = str(result.get("decision", "HOLD")).upper() if isinstance(result, dict) else str(result).upper()
         if decision == "HOLD":
@@ -136,7 +151,7 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
                 "message": f"Invalid SELL geometry: TP({tp}) < EN({entry}) < SL({sl})",
             }
 
-        # 4. حساب اللوت الديناميكي الآمن
+        # 4. حساب اللوت الديناميكي الآمن بناءً على الرصيد الحالي
         calculated_lot_size = _calculate_dynamic_lot(symbol, entry, sl, market_data)
         if calculated_lot_size <= 0:
             return {"status": "blocked", "decision": "HOLD", "message": "Zero lot size calculated (Risk block)"}
@@ -163,7 +178,7 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         )
 
         system_logger.info(
-            f"✅ EXECUTION GRANTED: {decision} on {symbol} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp}"
+            f"✅ EXECUTION GRANTED: {decision} on {symbol} | Strategy: {strategy_name} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp}"
         )
         return {
             "status": "success",
