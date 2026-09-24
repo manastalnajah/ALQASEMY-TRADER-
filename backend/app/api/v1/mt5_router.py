@@ -2,6 +2,7 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Header, HTTPException, BackgroundTasks, Request
 from sqlalchemy import text
+from pydantic import BaseModel  # 💡 تم إضافة هذه المكتبة للنماذج الجديدة
 
 from database import SessionLocal
 from app.config import config
@@ -11,6 +12,23 @@ from app.services.strategy_evaluator import evaluate_and_execute_strategy
 logger = logging.getLogger("mt5_router")
 
 router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 Gateway"])
+
+# =====================================================================
+# 💡 نماذج بيانات جديدة لاستقبال تأكيد (Ack) وتقرير (Report) الإكسبيرت
+# =====================================================================
+class CommandAck(BaseModel):
+    ea_id: Optional[str] = None
+
+class CommandReport(BaseModel):
+    status: str
+    mt5_order_ticket: Optional[int] = 0
+    mt5_deal_ticket: Optional[int] = 0
+    fill_price: Optional[float] = 0.0
+    executed_volume: Optional[float] = 0.0
+    error_message: Optional[str] = ""
+    ea_id: Optional[str] = ""
+    account_number: Optional[int] = 0
+# =====================================================================
 
 
 def _authorize(x_mt5_key: Optional[str]):
@@ -246,7 +264,6 @@ def account_heartbeat(
 # ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد والاختناق) ───────────────
 
 def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
-    """هذه الدالة تعمل في الخلفية لإدخال الشموع على دفعات لحماية قاعدة البيانات من الـ Timeout"""
     db = SessionLocal()
     try:
         parameters = [{
@@ -260,7 +277,6 @@ def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str)
             "v": candle.volume
         } for candle in req.candles]
 
-        # 🛠️ تقسيم البيانات إلى حزم صغيرة (100 شمعة لكل حزمة) لتجنب Statement Timeout
         chunk_size = 100
         for i in range(0, len(parameters), chunk_size):
             chunk = parameters[i:i + chunk_size]
@@ -275,9 +291,8 @@ def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str)
                     close = EXCLUDED.close,
                     volume = EXCLUDED.volume
             """), chunk)
-            db.commit() # حفظ كل حزمة بشكل مستقل
+            db.commit() 
 
-        # تشغيل الاستراتيجية بعد اكتمال حفظ جميع الحزم
         latest = req.candles[-1]
         run_strategy_in_background(
             symbol=req.symbol,
@@ -302,14 +317,12 @@ def sync_candles(
     if not req.candles:
         return {"status": "ignored", "count": 0}
 
-    # استخراج ea_id لتمريره للمهمة الخلفية
     ea_id = req.ea_id or "MT5-ALQASEMY-01"
     
-    # إرسال العملية الثقيلة إلى الخلفية للعمل بشكل مستقل على دفعات
     background_tasks.add_task(process_candles_background_task, req, ea_id)
     
-    # الرد فوراً في نفس اللحظة بـ 200 OK للإكسبيرت لكي لا يقطع الاتصال أبداً
     return {"status": "success", "count": len(req.candles), "message": "processing in background chunks"}
+
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
 
 @router.get("/candles/status")
@@ -480,7 +493,7 @@ def sync_symbol_specs(
         db.close()
 
 
-# ─── 8. Commands Polling & Execution Report ───────────────────────────────────
+# ─── 8. Commands Polling, ACK & Execution Report ──────────────────────────────
 
 @router.get("/commands")
 def get_pending_commands(
@@ -523,6 +536,73 @@ def get_pending_commands(
         db.close()
 
 
+# 💡 المسار المضاف الجديد لتأكيد الاستلام (ACK)
+@router.post("/commands/{command_id}/ack")
+def acknowledge_command(
+    command_id: str,
+    payload: CommandAck,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            UPDATE trade_commands
+            SET status = 'processing', updated_at = NOW()
+            WHERE id = CAST(:cmd_id AS UUID) AND status = 'pending'
+        """), {"cmd_id": command_id})
+        db.commit()
+        return {"status": "success", "command_id": command_id}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Ack failed: %s", exc)
+        raise HTTPException(500, "Ack failed")
+    finally:
+        db.close()
+
+
+# 💡 تم تحديث المسار ليتطابق تماماً مع ما يطلبه الإكسبيرت (Report)
+@router.post("/commands/{command_id}/report")
+def report_execution_single(
+    command_id: str,
+    report: CommandReport,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    dbSession = SessionLocal()
+    try:
+        ticket = report.mt5_order_ticket or report.mt5_deal_ticket
+        dbSession.execute(text("""
+            UPDATE trade_commands
+            SET status = :status,
+                ticket = :ticket,
+                mt5_order_ticket = :order_ticket,
+                mt5_deal_ticket = :deal_ticket,
+                fill_price = :fill_price,
+                error_message = :err,
+                executed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = CAST(:cmd_id AS UUID)
+        """), {
+            "status": report.status,
+            "ticket": ticket,
+            "order_ticket": report.mt5_order_ticket,
+            "deal_ticket": report.mt5_deal_ticket,
+            "fill_price": report.fill_price,
+            "err": report.error_message or "",
+            "cmd_id": command_id
+        })
+        dbSession.commit()
+        return {"status": "success"}
+    except Exception as exc:
+        dbSession.rollback()
+        logger.exception("Report execution failed: %s", exc)
+        raise HTTPException(500, "Report execution failed")
+    finally:
+        dbSession.close()
+
+
+# تم إبقاء هذا المسار القديم احتياطياً حتى لا يتعطل أي جزء آخر من النظام
 @router.post("/reports")
 def report_execution(
     reports: List[schemas.CommandReportRequest],
