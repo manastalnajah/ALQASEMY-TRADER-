@@ -351,10 +351,19 @@ def check_candles_status(
             "latest_candle": str(latest) if latest else None,
             "ready": total >= 200
         }
+    except Exception as exc:
+        logger.warning(f"⚠️ DB busy checking status for {symbol} {timeframe}: {exc}")
+        # إرجاع استجابة آمنة بدلاً من 500 ليصبر الإكسبيرت حتى تفرغ قاعدة البيانات
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "count": 0,
+            "latest_candle": None,
+            "ready": False,
+            "error": "Database temporarily busy"
+        }
     finally:
         db.close()
-
-
 # ─── 5. Positions Sync ────────────────────────────────────────────────────────
 
 @router.post("/positions/sync")
