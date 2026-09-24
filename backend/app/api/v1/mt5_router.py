@@ -21,6 +21,7 @@ class CommandAck(BaseModel):
 
 class CommandReport(BaseModel):
     status: str
+    mt5_ticket: Optional[int] = 0          # 💡 تمت إضافة هذا الحقل
     mt5_order_ticket: Optional[int] = 0
     mt5_deal_ticket: Optional[int] = 0
     fill_price: Optional[float] = 0.0
@@ -28,6 +29,7 @@ class CommandReport(BaseModel):
     error_message: Optional[str] = ""
     ea_id: Optional[str] = ""
     account_number: Optional[int] = 0
+    command_id: Optional[str] = ""         # 💡 تمت إضافة هذا الحقل
 # =====================================================================
 
 
@@ -536,7 +538,6 @@ def get_pending_commands(
         db.close()
 
 
-# 💡 المسار المضاف الجديد لتأكيد الاستلام (ACK)
 @router.post("/commands/{command_id}/ack")
 def acknowledge_command(
     command_id: str,
@@ -561,7 +562,6 @@ def acknowledge_command(
         db.close()
 
 
-# 💡 تم تحديث المسار ليتطابق تماماً مع ما يطلبه الإكسبيرت (Report)
 @router.post("/commands/{command_id}/report")
 def report_execution_single(
     command_id: str,
@@ -571,7 +571,9 @@ def report_execution_single(
     _authorize(x_mt5_key)
     dbSession = SessionLocal()
     try:
-        ticket = report.mt5_order_ticket or report.mt5_deal_ticket
+        # 💡 التعديل الجوهري هنا: قبول mt5_ticket
+        ticket = report.mt5_ticket or report.mt5_order_ticket or report.mt5_deal_ticket
+        
         dbSession.execute(text("""
             UPDATE trade_commands
             SET status = :status,
