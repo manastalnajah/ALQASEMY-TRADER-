@@ -571,6 +571,7 @@ def acknowledge_command(
         db.close()
 
 
+# 💡 تم تصحيح اسم العمود من ticket إلى mt5_ticket
 @router.post("/commands/{command_id}/report")
 def report_execution_single(
     command_id: str,
@@ -580,13 +581,12 @@ def report_execution_single(
     _authorize(x_mt5_key)
     dbSession = SessionLocal()
     try:
-        # 💡 التعديل الجوهري هنا: قبول mt5_ticket
-        ticket = report.mt5_ticket or report.mt5_order_ticket or report.mt5_deal_ticket
+        ticket_val = report.mt5_ticket or report.mt5_order_ticket or report.mt5_deal_ticket
         
         dbSession.execute(text("""
             UPDATE trade_commands
             SET status = :status,
-                ticket = :ticket,
+                mt5_ticket = :ticket_val,         -- 💡 تم حل المشكلة هنا
                 mt5_order_ticket = :order_ticket,
                 mt5_deal_ticket = :deal_ticket,
                 fill_price = :fill_price,
@@ -596,7 +596,7 @@ def report_execution_single(
             WHERE id = CAST(:cmd_id AS UUID)
         """), {
             "status": report.status,
-            "ticket": ticket,
+            "ticket_val": ticket_val,
             "order_ticket": report.mt5_order_ticket,
             "deal_ticket": report.mt5_deal_ticket,
             "fill_price": report.fill_price,
@@ -613,7 +613,6 @@ def report_execution_single(
         dbSession.close()
 
 
-# تم إبقاء هذا المسار القديم احتياطياً حتى لا يتعطل أي جزء آخر من النظام
 @router.post("/reports")
 def report_execution(
     reports: List[schemas.CommandReportRequest],
@@ -623,17 +622,17 @@ def report_execution(
     dbSession = SessionLocal()
     try:
         for rep in reports:
-            ticket = rep.mt5_ticket or rep.mt5_order_ticket or rep.mt5_deal_ticket
+            ticket_val = rep.mt5_ticket or rep.mt5_order_ticket or rep.mt5_deal_ticket
             dbSession.execute(text("""
                 UPDATE trade_commands
                 SET status = :status,
-                    ticket = :ticket,
+                    mt5_ticket = :ticket_val,     -- 💡 وتم الحل هنا أيضاً
                     error_message = :err,
                     executed_at = NOW()
                 WHERE id = CAST(:cmd_id AS UUID)
             """), {
                 "status": rep.status,
-                "ticket": ticket,
+                "ticket_val": ticket_val,
                 "err": rep.error_message or "",
                 "cmd_id": rep.command_id if hasattr(rep, "command_id") else None
             })
