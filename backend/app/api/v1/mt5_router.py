@@ -571,7 +571,6 @@ def acknowledge_command(
         db.close()
 
 
-# 💡 تم تصحيح اسم العمود من ticket إلى mt5_ticket
 @router.post("/commands/{command_id}/report")
 def report_execution_single(
     command_id: str,
@@ -586,12 +585,11 @@ def report_execution_single(
         dbSession.execute(text("""
             UPDATE trade_commands
             SET status = :status,
-                mt5_ticket = :ticket_val,         -- 💡 تم حل المشكلة هنا
+                mt5_ticket = :ticket_val,
                 mt5_order_ticket = :order_ticket,
                 mt5_deal_ticket = :deal_ticket,
                 fill_price = :fill_price,
                 error_message = :err,
-                executed_at = NOW(),
                 updated_at = NOW()
             WHERE id = CAST(:cmd_id AS UUID)
         """), {
@@ -626,9 +624,9 @@ def report_execution(
             dbSession.execute(text("""
                 UPDATE trade_commands
                 SET status = :status,
-                    mt5_ticket = :ticket_val,     -- 💡 وتم الحل هنا أيضاً
+                    mt5_ticket = :ticket_val,
                     error_message = :err,
-                    executed_at = NOW()
+                    updated_at = NOW()
                 WHERE id = CAST(:cmd_id AS UUID)
             """), {
                 "status": rep.status,
