@@ -4,6 +4,7 @@ from app.services import trade_service
 from app.domain import schemas
 from app.logging.logger import system_logger
 from app.config import config
+from datetime import datetime, timezone  # 💡 [تحديث] إضافة مكتبات الوقت للفلتر الزمني
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -100,7 +101,22 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         return {"status": "ignored", "decision": "HOLD", "message": "Scalping disabled"}
     if strategy_name in ("golden_setup", "Golden Setup") and not getattr(config, "allow_golden_setup", True):
         return {"status": "ignored", "decision": "HOLD", "message": "Golden Setup disabled"}
+
     # ==================================================
+    # 🛡️ فلتر 1: الساعة البيولوجية (أوقات السيولة المؤسساتية)
+    # التداول مسموح فقط وقت تداخل بورصتي لندن ونيويورك (من 8 صباحاً حتى 5 مساءً بتوقيت جرينتش)
+    # ==================================================
+    current_utc_hour = datetime.now(timezone.utc).hour
+    if not (8 <= current_utc_hour <= 17):
+        return {"status": "ignored", "decision": "HOLD", "message": "Outside institutional liquidity hours"}
+
+    # ==================================================
+    # 🛡️ فلتر 2: كشف السيولة الوهمية (منع مصائد صناع السوق)
+    # ==================================================
+    current_volume = _safe_float(market_data.get("volume"), 0.0)
+    min_required_volume = 150.0  # الحد الأدنى لحجم التداول لقبول الشمعة
+    if current_volume < min_required_volume:
+        return {"status": "ignored", "decision": "HOLD", "message": f"Fake liquidity detected (Low Volume: {current_volume})"}
 
     try:
         # 💡 [التحديث الجوهري] معالجة RSI Reversion مباشرة هنا 
@@ -178,7 +194,7 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         )
 
         system_logger.info(
-            f"✅ EXECUTION GRANTED: {decision} on {symbol} | Strategy: {strategy_name} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp}"
+            f"✅ EXECUTION GRANTED: {decision} on {symbol} | Strategy: {strategy_name} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp} | Vol: {current_volume}"
         )
         return {
             "status": "success",
