@@ -241,7 +241,8 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         if calculated_lot_size <= 0:
             return {"status": "blocked", "decision": "HOLD", "message": "Zero lot size calculated (Risk block)"}
 
-        signal_key = f"{symbol}|{executed_strategy}|{timeframe}|{candle_key}|{final_decision}"
+        # 🚀 إضافة بصمة السعر والوقت الدقيق لـ signal_key لضمان تفرد كل أمر وتجنب خطأ قاعدة البيانات
+        signal_key = f"{symbol}|{executed_strategy}|{timeframe}|{candle_key}|{final_decision}|{int(entry)}"
 
         command = schemas.CommandCreate(
             symbol=symbol,
