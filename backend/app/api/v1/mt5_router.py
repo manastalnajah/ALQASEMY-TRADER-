@@ -151,7 +151,7 @@ def sync_account(
                 margin_level = CAST(:margin_level AS NUMERIC),
                 is_connected = :connected,
                 is_active = true,
-                is_trade_allowed = :is_trade_allowed,  # 🚀 تعديل 1: تحديث حالة التداول ديناميكياً
+                is_trade_allowed = :is_trade_allowed,
                 server = CASE WHEN server IS NULL OR server = '' OR server = 'unknown' THEN :server ELSE server END,
                 currency = COALESCE(:currency, currency),
                 leverage = COALESCE(:leverage, leverage),
@@ -170,7 +170,7 @@ def sync_account(
             "profit": account_data.profit,
             "margin_level": margin_level,
             "connected": account_data.is_connected,
-            "is_trade_allowed": getattr(account_data, "is_trade_allowed", True), # 🚀 تمرير قيمة تفعيل التداول
+            "is_trade_allowed": getattr(account_data, "is_trade_allowed", True),
             "server": server_name,
             "currency": account_data.currency,
             "leverage": account_data.leverage,
@@ -203,7 +203,7 @@ def sync_account(
                 "profit": account_data.profit,
                 "margin_level": margin_level,
                 "connected": account_data.is_connected,
-                "is_trade_allowed": getattr(account_data, "is_trade_allowed", True), # 🚀 تمرير قيمة التفعيل عند الإنشاء أيضاً
+                "is_trade_allowed": getattr(account_data, "is_trade_allowed", True),
                 "currency": account_data.currency,
                 "leverage": account_data.leverage,
                 "ea_id": account_data.ea_id or "",
