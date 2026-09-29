@@ -2,7 +2,7 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Header, HTTPException, BackgroundTasks, Request
 from sqlalchemy import text
-from pydantic import BaseModel  # 💡 تم إضافة هذه المكتبة للنماذج الجديدة
+from pydantic import BaseModel
 
 from database import SessionLocal
 from app.config import config
@@ -14,14 +14,14 @@ logger = logging.getLogger("mt5_router")
 router = APIRouter(prefix="/api/v1/mt5", tags=["MT5 Gateway"])
 
 # =====================================================================
-# 💡 نماذج بيانات جديدة لاستقبال تأكيد (Ack) وتقرير (Report) الإكسبيرت
+# نماذج بيانات لتأكيد (Ack) وتقرير (Report) الإكسبيرت
 # =====================================================================
 class CommandAck(BaseModel):
     ea_id: Optional[str] = None
 
 class CommandReport(BaseModel):
     status: str
-    mt5_ticket: Optional[int] = 0          # 💡 تمت إضافة هذا الحقل
+    mt5_ticket: Optional[int] = 0
     mt5_order_ticket: Optional[int] = 0
     mt5_deal_ticket: Optional[int] = 0
     fill_price: Optional[float] = 0.0
@@ -29,7 +29,7 @@ class CommandReport(BaseModel):
     error_message: Optional[str] = ""
     ea_id: Optional[str] = ""
     account_number: Optional[int] = 0
-    command_id: Optional[str] = ""         # 💡 تمت إضافة هذا الحقل
+    command_id: Optional[str] = ""
 # =====================================================================
 
 
@@ -57,6 +57,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
         if bot_state_record and not bot_state_record["is_running"]:
             return
 
+        # 🚀 جلب الحساب الحقيقي النشط فقط دون أي قيم وهمية
         account = db.execute(
             text("""
                 SELECT id, account_number, balance, equity, currency 
@@ -78,9 +79,17 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
             ).mappings().first()
 
         if not account:
+            logger.warning(f"⚠️ Strategy execution skipped: No active trading account found for EA ID: {ea_id}")
             return
 
         account_id = str(account["id"])
+
+        # 🚀 التحقق من توفر الرصيد الحقيقي (حماية ضد الحسابات غير المتزامنة)
+        real_balance = float(account["balance"] or 0.0)
+        real_equity = float(account["equity"] or 0.0)
+        if real_balance <= 0:
+            logger.error(f"🛑 CRITICAL: Real balance is zero or negative for account {account['account_number']}. Blocking strategy.")
+            return
 
         spec = db.execute(
             text("SELECT tick_size, tick_value, point, digits FROM symbol_specs WHERE symbol = :sym LIMIT 1"),
@@ -90,6 +99,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
         tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
         tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
 
+        # 🚀 حقن رأس المال الحقيقي بالكامل دون أي افتراضات وهمية
         market_data = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -99,8 +109,8 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
             "low": float(latest_candle.low),
             "close": float(latest_candle.close),
             "volume": float(latest_candle.volume),
-            "balance": float(account["balance"] or 10000.0),
-            "equity": float(account["equity"] or 10000.0),
+            "balance": real_balance,
+            "equity": real_equity,
             "tick_size": tick_size,
             "tick_value": tick_value,
             "ea_id": ea_id,
@@ -118,7 +128,7 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
 
         decision = result.get("decision", "HOLD")
         if decision != "HOLD":
-            logger.info(f"🎯 Signal: {decision} on {symbol} | Account: {account['account_number']}")
+            logger.info(f"🎯 Signal: {decision} on {symbol} | Account: {account['account_number']} | Real Balance: {real_balance}")
 
     except Exception as e:
         logger.exception(f"❌ Strategy Execution error: {e}")
@@ -352,18 +362,17 @@ def check_candles_status(
             "timeframe": timeframe,
             "count": total,
             "latest_candle": str(latest) if latest else None,
-            "last_open_time": str(latest) if latest else "",  # 🚀 تعديل 2: إضافة المفتاح الذي يبحث عنه الإكسبيرت (MQL5)
+            "last_open_time": str(latest) if latest else "",
             "ready": total >= 200
         }
     except Exception as exc:
         logger.warning(f"⚠️ DB busy checking status for {symbol} {timeframe}: {exc}")
-        # إرجاع استجابة آمنة بدلاً من 500 ليصبر الإكسبيرت حتى تفرغ قاعدة البيانات
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "count": 0,
             "latest_candle": None,
-            "last_open_time": "", # 🚀 إضافة المفتاح هنا لتفادي الخطأ في الحالات الاستثنائية
+            "last_open_time": "",
             "ready": False,
             "error": "Database temporarily busy"
         }
@@ -546,8 +555,8 @@ def get_pending_commands(
                 "strategy_name": r["strategy_name"] or "",
                 "signal_key": r["signal_key"] or "",
                 "created_at": r["created_at"].isoformat() if r["created_at"] else "",
-                "created_epoch": r["created_at"].timestamp() if r["created_at"] else 0, # 🚀 تعديل 3: إرسال وقت الإنشاء بصيغة Unix Timestamp ليقرأها MT5
-                "expires_epoch": 0, # 🚀 تعديل 4: تعيين 0 يعني عدم انتهاء الصلاحية من جهة السيرفر
+                "created_epoch": r["created_at"].timestamp() if r["created_at"] else 0,
+                "expires_epoch": 0,
                 "ea_id": r["ea_id"] or ""
             })
         return commands
