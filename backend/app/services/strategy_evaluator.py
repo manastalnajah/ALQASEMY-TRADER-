@@ -134,12 +134,16 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         return {"status": "ignored", "decision": "HOLD", "message": "Golden Setup disabled"}
 
     # ==================================================
-    # 🛡️️ فلتر 1: الساعة البيولوجية (أوقات السيولة المؤسساتية)
+    # 🛡️ فلتر أوقات الجلسات العالمية الفعالة (تجنب الساعات الميتة)
+    # المسموح: من الساعة 07:00 صباحاً وحتى الساعة 21:00 مسائاً بتوقيت غرينتش (UTC)
+    # يغطي جلسة لندن بالكامل، نيويورك بالكامل، ووقت التداخل القوي بينهم.
     # ==================================================
     current_utc_hour = datetime.now(timezone.utc).hour
-    if not (8 <= current_utc_hour <= 17):
-        system_logger.info(f"⏳ HOLD: {symbol} is outside institutional hours (Current UTC: {current_utc_hour})")
-        return {"status": "ignored", "decision": "HOLD", "message": "Outside institutional liquidity hours"}
+    
+    # السماح بالعمل إذا كان الوقت بين 7 صباحاً و 9 مساءً UTC
+    if not (7 <= current_utc_hour <= 21):
+        system_logger.info(f"⏳ HOLD: {symbol} is outside active session hours (Current UTC: {current_utc_hour}. Market is in dead night zone).")
+        return {"status": "ignored", "decision": "HOLD", "message": "Outside active market sessions"}
 
     # ==================================================
     # 🛡️ فلتر 2: كشف السيولة الوهمية (تم ضبطه بشكل ديناميكي)
