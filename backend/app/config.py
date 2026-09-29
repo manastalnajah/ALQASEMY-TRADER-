@@ -27,6 +27,7 @@ class TradingConfig:
     direction_timeframe: str = os.getenv("DIRECTION_TIMEFRAME", "H1").upper()
     confirmation_timeframe: str = os.getenv("CONFIRMATION_TIMEFRAME", "M15").upper()
     entry_timeframe: str = os.getenv("ENTRY_TIMEFRAME", "M5").upper()
+    
     # Legacy alias kept for compatibility; execution is always on ENTRY_TIMEFRAME.
     timeframe: str = os.getenv("ENTRY_TIMEFRAME", "M5").upper()
 
@@ -46,7 +47,8 @@ class TradingConfig:
     entry_candle_retention: int = _int("ENTRY_CANDLE_RETENTION", 20000)
     candle_sync_batch_size: int = _int("CANDLE_SYNC_BATCH_SIZE", 1000)
 
-    enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "golden").split(",") if s.strip())
+    # 🚀 تم تحديث القائمة الافتراضية لتشمل جميع الاستراتيجيات الفعالة
+    enabled_strategies: tuple[str, ...] = tuple(s.strip().lower() for s in os.getenv("ENABLED_STRATEGIES", "golden_setup,smart_limits,rsi_reversion").split(",") if s.strip())
     
     # ==========================================
     # 🚨 إعدادات إدارة رأس المال والاختبار
@@ -70,14 +72,14 @@ class TradingConfig:
     # 🎯 إعدادات الاستراتيجية والوقف والأهداف
     # ==========================================
     atr_period: int = _int("ATR_PERIOD", 14)
-    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 2.5)  # تعديل طفيف لمنع الوقف من الابتعاد المفرط
+    atr_sl_multiplier: float = _float("ATR_SL_MULTIPLIER", 2.5)
     reward_risk: float = _float("REWARD_RISK", 1.5)
     
     # تم رفع السبريد المسموح إلى 350 لضمان عدم رفض صفقات الذهب
     max_spread_points: float = _float("MAX_SPREAD_POINTS", 350.0)
 
     # ==========================================
-    # 🧠 إعدادات الاستراتيجيات (هنا كان سبب الانهيار)
+    # 🧠 إعدادات الاستراتيجيات 
     # ==========================================
     # Golden Setup
     golden_ema_period: int = _int("GOLDEN_EMA_PERIOD", 200)
@@ -90,10 +92,13 @@ class TradingConfig:
     rsi_overbought_level: float = _float("RSI_OVERBOUGHT_LEVEL", 70.0)
 
     # ==========================================
-    # 🔐 مفاتيح الاتصال
+    # 🔐 مفاتيح الاتصال وتفعيل الاستراتيجيات (تمت ترقيتها)
     # ==========================================
-    allow_smart_limits: bool = os.getenv("ALLOW_SMART_LIMITS", "false").lower() == "true"
+    # 🚀 تفعيل ذكي ومباشر للاستراتيجيات (إلا إذا تم إيقافها من المتغيرات البيئية)
+    allow_golden_setup: bool = os.getenv("ALLOW_GOLDEN_SETUP", "true").lower() == "true"
+    allow_smart_limits: bool = os.getenv("ALLOW_SMART_LIMITS", "true").lower() == "true"
     allow_scalping: bool = os.getenv("ALLOW_SCALPING", "false").lower() == "true"
+    
     mt5_api_key: str = os.getenv("MT5_API_KEY", "")
     require_mt5_api_key: bool = os.getenv("REQUIRE_MT5_API_KEY", "true").lower() == "true"
     control_api_key: str = os.getenv("CONTROL_API_KEY", "AlqasemyTrader2026_SecureKey!@")
