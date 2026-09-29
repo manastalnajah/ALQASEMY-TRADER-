@@ -1,10 +1,11 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.strategies.strategy_manager import manager as strategy_manager
 from app.services import trade_service
 from app.domain import schemas
 from app.logging.logger import system_logger
 from app.config import config
-from datetime import datetime, timezone  # 💡 [تحديث] إضافة مكتبات الوقت للفلتر الزمني
+from datetime import datetime, timezone
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -84,6 +85,36 @@ def _calculate_dynamic_lot(symbol: str, entry: float, sl: float, market_data: di
     return max(0.01, min(lot_size, max_lots))
 
 
+# 🚀 [إضافة مؤسسية] محرك رياضي داخلي لحساب RSI من قاعدة البيانات لضمان دقة الإشارات
+def calculate_rsi(prices: list, period: int = 14) -> float:
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(change))
+    
+    # حساب المتوسط المبدئي
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    # استخدام التنعيم (Smoothed Moving Average) بقية الفترات كما في منصات التداول
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
 def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: str, market_data: dict):
     symbol = str(market_data.get("symbol") or "").upper()
     timeframe = str(market_data.get("timeframe") or getattr(config, "timeframe", "M5")).upper()
@@ -103,71 +134,85 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         return {"status": "ignored", "decision": "HOLD", "message": "Golden Setup disabled"}
 
     # ==================================================
-    # 🛡️ فلتر 1: الساعة البيولوجية (أوقات السيولة المؤسساتية)
-    # التداول مسموح فقط وقت تداخل بورصتي لندن ونيويورك (من 8 صباحاً حتى 5 مساءً بتوقيت جرينتش)
+    # 🛡️️ فلتر 1: الساعة البيولوجية (أوقات السيولة المؤسساتية)
     # ==================================================
     current_utc_hour = datetime.now(timezone.utc).hour
     if not (8 <= current_utc_hour <= 17):
+        system_logger.info(f"⏳ HOLD: {symbol} is outside institutional hours (Current UTC: {current_utc_hour})")
         return {"status": "ignored", "decision": "HOLD", "message": "Outside institutional liquidity hours"}
 
     # ==================================================
-    # 🛡️ فلتر 2: كشف السيولة الوهمية (منع مصائد صناع السوق)
+    # 🛡️ فلتر 2: كشف السيولة الوهمية (تم ضبطه بشكل ديناميكي)
     # ==================================================
     current_volume = _safe_float(market_data.get("volume"), 0.0)
-    min_required_volume = 150.0  # الحد الأدنى لحجم التداول لقبول الشمعة
+    min_required_volume = getattr(config, "min_required_volume", 10.0)  # 🚀 التخفيض لمنع تجميد الإكسبيرت في فريمات M5
     if current_volume < min_required_volume:
-        return {"status": "ignored", "decision": "HOLD", "message": f"Fake liquidity detected (Low Volume: {current_volume})"}
+        system_logger.info(f"📉 HOLD: {symbol} Fake liquidity detected (Low Volume: {current_volume} < {min_required_volume})")
+        return {"status": "ignored", "decision": "HOLD", "message": f"Low Volume: {current_volume}"}
 
     try:
-        # 💡 [التحديث الجوهري] معالجة RSI Reversion مباشرة هنا 
-        if strategy_name == "rsi_reversion":
-            rsi = _safe_float(market_data.get("rsi"), 50.0)
-            oversold = getattr(config, "rsi_oversold_level", 30.0)
-            overbought = getattr(config, "rsi_overbought_level", 70.0)
-            
-            # اقتناص مناطق التشبع للارتداد
-            if 0 < rsi <= oversold:
-                result = {"decision": "BUY"}
-            elif rsi >= overbought:
-                result = {"decision": "SELL"}
-            else:
-                result = {"decision": "HOLD"}
-        else:
-            # تنفيذ الاستراتيجيات الأخرى المعتادة (مثل golden_setup)
-            result = strategy_manager.execute(strategy_name, market_data)
+        decision = "HOLD"
 
-        decision = str(result.get("decision", "HOLD")).upper() if isinstance(result, dict) else str(result).upper()
+        # ==================================================
+        # 🧠 تنفيذ الاستراتيجيات
+        # ==================================================
+        if strategy_name == "rsi_reversion":
+            # 🚀 استدعاء آخر 20 شمعة من الداتا بيز لحساب RSI دقيق جداً
+            rows = db.execute(text("""
+                SELECT close FROM candles 
+                WHERE symbol_name = :sym AND timeframe = :tf 
+                ORDER BY open_time DESC LIMIT 20
+            """), {"sym": symbol, "tf": timeframe}).mappings().all()
+
+            if len(rows) >= 15:
+                # قلب المصفوفة لتكون الأقدم أولاً كما تتطلب معادلة RSI
+                prices = [float(r["close"]) for r in rows][::-1]
+                rsi_value = calculate_rsi(prices, period=14)
+                
+                oversold = getattr(config, "rsi_oversold_level", 30.0)
+                overbought = getattr(config, "rsi_overbought_level", 70.0)
+                
+                # طباعة تفصيلية لقيمة المؤشر للشفافية
+                system_logger.info(f"📊 {symbol} ({timeframe}) RSI(14) = {rsi_value:.2f}")
+
+                if 0 < rsi_value <= oversold:
+                    decision = "BUY"
+                elif rsi_value >= overbought:
+                    decision = "SELL"
+            else:
+                system_logger.info(f"⚠️ HOLD: Not enough candles in DB to calculate RSI for {symbol} (Found: {len(rows)})")
+                
+        else:
+            # تنفيذ الاستراتيجيات الأخرى المعتادة 
+            result = strategy_manager.execute(strategy_name, market_data)
+            decision = str(result.get("decision", "HOLD")).upper() if isinstance(result, dict) else str(result).upper()
+
         if decision == "HOLD":
             return {"status": "success", "decision": "HOLD"}
 
-        entry = _safe_float(result.get("entry_price", 0.0) if isinstance(result, dict) else 0.0)
-        sl = _safe_float(result.get("sl", 0.0) if isinstance(result, dict) else 0.0)
-        tp = _safe_float(result.get("tp", 0.0) if isinstance(result, dict) else 0.0)
+        # ==================================================
+        # 🎯 معالجة أمر التنفيذ عند صدور الإشارة
+        # ==================================================
+        system_logger.info(f"🎯 ACTUAL SIGNAL TRIGGERED: {decision} on {symbol} (Strategy: {strategy_name})")
 
-        # 1. تحديد السعر الفعلي (Bid/Ask)
-        if entry <= 0:
-            entry = _price(market_data, decision)
+        # 1. تحديد السعر الفعلي 
+        entry = _price(market_data, decision)
 
         # 2. بناء مستويات الحماية
-        sl, tp = _build_protection(market_data, decision, entry, sl, tp)
+        sl_raw = _safe_float(market_data.get("sl", 0.0))
+        tp_raw = _safe_float(market_data.get("tp", 0.0))
+        sl, tp = _build_protection(market_data, decision, entry, sl_raw, tp_raw)
+        
         if sl <= 0 or tp <= 0:
             return {"status": "blocked", "decision": "HOLD", "message": "No valid SL/TP"}
 
-        # 3. التحقق النهائي من هندسة الصفقة (Geometry Check)
+        # 3. التحقق النهائي من هندسة الصفقة
         if decision.startswith("BUY") and not (sl < entry < tp):
-            return {
-                "status": "blocked",
-                "decision": "HOLD",
-                "message": f"Invalid BUY geometry: SL({sl}) < EN({entry}) < TP({tp})",
-            }
+            return {"status": "blocked", "decision": "HOLD", "message": f"Invalid BUY geometry: SL({sl}) < EN({entry}) < TP({tp})"}
         if decision.startswith("SELL") and not (tp < entry < sl):
-            return {
-                "status": "blocked",
-                "decision": "HOLD",
-                "message": f"Invalid SELL geometry: TP({tp}) < EN({entry}) < SL({sl})",
-            }
+            return {"status": "blocked", "decision": "HOLD", "message": f"Invalid SELL geometry: TP({tp}) < EN({entry}) < SL({sl})"}
 
-        # 4. حساب اللوت الديناميكي الآمن بناءً على الرصيد الحالي
+        # 4. حساب اللوت 
         calculated_lot_size = _calculate_dynamic_lot(symbol, entry, sl, market_data)
         if calculated_lot_size <= 0:
             return {"status": "blocked", "decision": "HOLD", "message": "Zero lot size calculated (Risk block)"}
@@ -194,7 +239,7 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         )
 
         system_logger.info(
-            f"✅ EXECUTION GRANTED: {decision} on {symbol} | Strategy: {strategy_name} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp} | Vol: {current_volume}"
+            f"✅ COMMAND CREATED IN DB: {decision} on {symbol} | Lot: {calculated_lot_size} | Entry: {entry} | SL: {sl} | TP: {tp}"
         )
         return {
             "status": "success",
