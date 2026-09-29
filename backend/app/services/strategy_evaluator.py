@@ -146,13 +146,11 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
         return {"status": "ignored", "decision": "HOLD", "message": "Outside active market sessions"}
 
     # ==================================================
-    # 🛡️ فلتر 2: كشف السيولة الوهمية (تم ضبطه بشكل ديناميكي)
+    # 🛡️ فلتر السيولة (تم إلغاء القيود لضمان العمل مع كافة البروكرات)
     # ==================================================
     current_volume = _safe_float(market_data.get("volume"), 0.0)
-    min_required_volume = getattr(config, "min_required_volume", 10.0)  # 🚀 التخفيض لمنع تجميد الإكسبيرت في فريمات M5
-    if current_volume < min_required_volume:
-        system_logger.info(f"📉 HOLD: {symbol} Fake liquidity detected (Low Volume: {current_volume} < {min_required_volume})")
-        return {"status": "ignored", "decision": "HOLD", "message": f"Low Volume: {current_volume}"}
+    # تم إلغاء شرط الرفض بناءً على حجم التيك لتجنب توقف البوت عندما يرسل البروكر حجم 0.0
+    system_logger.debug(f"ℹ️ {symbol} Volume check passed: {current_volume}")
 
     try:
         decision = "HOLD"
