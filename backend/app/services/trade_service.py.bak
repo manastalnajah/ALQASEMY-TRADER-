@@ -1,21 +1,24 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from fastapi import HTTPException
-# استدعاء القوالب ومستودع البيانات
 from app.domain import schemas
 from app.repositories import trade_repo
-# استدعاء المراقب (Logger) الذي أنشأناه للتو
 from app.logging.logger import system_logger
 
-def process_new_command(db: Session, command: schemas.CommandCreate):
+def process_new_command(db: Session, command: schemas.CommandCreate, account_id: str = None, enforce_risk: bool = True):
     """
     هذه الدالة تمثل 'نقطة التفتيش' وإدارة المخاطر (Risk Management).
-    أي أمر قادم من تطبيق فلاتر سيمر من هنا أولاً قبل أن يصل لقاعدة البيانات.
+    أي أمر قادم من العقل المدبر سيمر من هنا أولاً للتأكد من هندسته قبل الحفظ.
     """
     
+    # توحيد الصيغة وتصحيحها
+    command.order_type = command.order_type.upper()
+    command.symbol = command.symbol.upper()
+
     # تسجيل حدث استلام أمر جديد
-    system_logger.info(f"📥 استلام أمر جديد للتدقيق: {command.order_type} {command.symbol} بحجم لوت {command.lot_size}")
+    system_logger.info(f"📥 استلام أمر للتدقيق: {command.order_type} {command.symbol} | اللوت: {command.lot_size}")
     
-    # 1. شرط الأمان الأول: التحقق من حجم اللوت (Lot Size)
+    # 1. شرط الأمان الأول: التحقق من حجم اللوت 
     if command.lot_size <= 0 or command.lot_size > 50:
         system_logger.warning(f"⚠️ تم رفض الأمر: حجم اللوت ({command.lot_size}) غير مسموح به!")
         raise HTTPException(
@@ -23,19 +26,32 @@ def process_new_command(db: Session, command: schemas.CommandCreate):
             detail="⚠️ خطأ: حجم اللوت غير مسموح! يجب أن يكون بين 0.01 و 50"
         )
         
-    # 2. شرط الأمان الثاني: التحقق من نوع الأمر
-    if command.order_type.lower() not in ["buy", "sell"]:
+    # 2. شرط الأمان الثاني: التحقق من نوع الأمر (دعم الأوامر المعلقة)
+    valid_orders = ["BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"]
+    if command.order_type not in valid_orders:
         system_logger.warning(f"⚠️ تم رفض الأمر: نوع الأمر ({command.order_type}) غير معروف!")
         raise HTTPException(
             status_code=400, 
-            detail="⚠️ خطأ: نوع الأمر يجب أن يكون 'buy' أو 'sell' فقط"
+            detail=f"⚠️ خطأ: نوع الأمر يجب أن يكون من ضمن الأوامر المعتمدة."
         )
+
+    # 3. إدارة المخاطر وتجنب تكرار الصفقات (بدلاً من الـ POSITION_SNAPSHOT_STALE)
+    if enforce_risk:
+        # فحص ذكي: لا تفتح صفقة إذا كان هناك أمر قيد الانتظار لنفس الزوج
+        pending_count = db.execute(
+            text("SELECT COUNT(*) FROM trade_commands WHERE symbol = :sym AND status = 'pending'"),
+            {"sym": command.symbol}
+        ).scalar()
         
-    # 3. توحيد صيغة رمز العملة
-    command.symbol = command.symbol.upper()
+        if pending_count > 0:
+            system_logger.warning(f"🛑 تم رفض الأمر: يوجد أمر قيد الانتظار بالفعل للزوج {command.symbol}")
+            raise HTTPException(
+                status_code=409, 
+                detail="Trade blocked by risk engine: Duplicate pending command"
+            )
 
     # تسجيل حدث نجاح الفحص
-    system_logger.info("✅ اجتاز الأمر شروط الأمان بنجاح، جاري الحفظ في قاعدة البيانات...")
+    system_logger.info("✅ اجتاز الأمر شروط الأمان والمخاطر بنجاح، جاري الإصدار للميتاتريدر...")
 
-    # إرسال الأمر للحفظ في المستودع
+    # إرسال الأمر للحفظ في المستودع ليقوم الإكسبيرت بتنفيذه
     return trade_repo.create_trade_command(db=db, command=command)
