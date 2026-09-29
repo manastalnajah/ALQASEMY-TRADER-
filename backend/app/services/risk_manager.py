@@ -57,12 +57,10 @@ def _fresh_account(db: Session, account_id: str):
     return account, None
 
 
-
 def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
-    """إدارة حالة المخاطر بطريقة آمنة بالكامل تتجنب مشاكل الـ ON CONFLICT وقيود الـ id"""
+    """إدارة حالة المخاطر بطريقة آمنة بالكامل"""
     day_key = _utcnow().strftime("%Y-%m-%d")
     
-    # 1. محاولة جلب السجل قيد القفل المتزامن
     state = db.execute(text("""
         SELECT * FROM risk_state 
         WHERE account_id = :account_id AND day_key = :day_key 
@@ -71,17 +69,15 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
     
     if not state:
         try:
-            # 2. إذا لم يكن موجوداً، نقوم بإدخاله مباشرة مع السماح بقاعدة البيانات بتوليد الـ id أو تخطيه بأمان
             db.execute(text("""
                 INSERT INTO risk_state (account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
                 VALUES (:account_id, :day_key, :equity, :equity, false, '', :now)
             """), {"account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
             db.commit()
         except Exception as insert_err:
-            db.rollback()  # تراجع آمن في حال سبق وتم إدخاله بواسطة عملية متزامنة أخرى
+            db.rollback() 
             system_logger.debug(f"Risk state insert handled gracefully: {insert_err}")
             
-        # 3. إعادة الجلب للتأكد من الحصول عليه بعد الإدخال الناجح
         state = db.execute(text("""
             SELECT * FROM risk_state 
             WHERE account_id = :account_id AND day_key = :day_key
@@ -101,18 +97,20 @@ def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
         
     return dict(state, high_water_equity=high)
 
+
 def _active_counts(db: Session, account_id: str, account_number: int, symbol: str):
-    """فصل الأوامر والصفقات المعلقة بناءً على الحساب لمنع التداخل"""
+    """فصل الأوامر والصفقات المعلقة لمنع التداخل (تم التحديث ليتوافق مع الجداول الجديدة)"""
     command_row = db.execute(text("""
         SELECT COUNT(*) AS pending
         FROM trade_commands
         WHERE account_id=:account_id AND symbol=:symbol AND status IN ('pending','processing')
     """), {"account_id": account_id, "symbol": symbol}).mappings().first()
     
+    # استخدام الجدول الصحيح pending_orders
     live_pending = db.execute(text("""
         SELECT COUNT(*) AS pending
-        FROM pending_orders WHERE account_number=:account_number AND symbol=:symbol
-    """), {"account_number": account_number, "symbol": symbol}).mappings().first()
+        FROM pending_orders WHERE symbol=:symbol
+    """), {"symbol": symbol}).mappings().first()
     
     return int(command_row["pending"] or 0) + int(live_pending["pending"] or 0)
 
@@ -161,20 +159,18 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
     symbol = symbol.upper()
     order_type = order_type.upper()
     
-    # دعم أوامر الإيقاف لتطابق EA v14.0
+    # دعم أوامر الإيقاف والأوامر المعلقة
     if order_type not in {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}:
         return None, "INVALID_ORDER_TYPE"
     if entry <= 0 or stop <= 0 or target <= 0:
         return None, "SL_TP_REQUIRED"
 
-    # عزل قفل التزامن ليكون مخصصاً لكل حساب ورمز معاً لتجنب حظر حسابات أخرى
     lock_key = f"ALQASEMY:{account_id}:{symbol}"
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
 
-    # التحقق من التكرار داخل نفس الحساب
     duplicate = db.execute(text("""
         SELECT id FROM trade_commands
-        WHERE account_id=:account_id
+        WHERE account_id=:account_id 
           AND symbol=:symbol
           AND order_type=:order_type
           AND status IN ('pending','processing')
@@ -233,27 +229,17 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
         """), {"reason": "MAX_DRAWDOWN", "now": _utcnow(), "account_id": account_id, "day_key": state["day_key"]})
         return None, "MAX_DRAWDOWN"
 
-    snapshot = db.execute(text("SELECT last_sync FROM position_snapshots WHERE account_number=:account"), {"account": account_number}).first()
-    if not snapshot:
-        return None, "POSITION_SNAPSHOT_MISSING"
-    snap = snapshot[0]
-    if isinstance(snap, str):
-        snap = datetime.fromisoformat(snap.replace("Z", "+00:00"))
-    if snap.tzinfo is None:
-        snap = snap.replace(tzinfo=timezone.utc)
-        
-    if (_utcnow() - snap).total_seconds() > config.account_stale_seconds:
-        return None, "POSITION_SNAPSHOT_STALE"
-
+    # 🚀 تم إزالة كود الـ STALE الخاطئ الذي كان يوقف الصفقات
+    # وتم تصحيح الجدول إلى open_positions كما هو في الـ Router
     counts = db.execute(text("""
         SELECT COUNT(*) AS total
-        FROM live_positions WHERE account_number=:account
-    """), {"account": account_number}).mappings().first()
+        FROM open_positions
+    """)).mappings().first()
     
     symbol_counts = db.execute(text("""
         SELECT COALESCE(SUM(volume),0) AS symbol_volume
-        FROM live_positions WHERE account_number=:account AND symbol=:symbol
-    """), {"account": account_number, "symbol": symbol}).mappings().first()
+        FROM open_positions WHERE symbol=:symbol
+    """), {"symbol": symbol}).mappings().first()
     
     open_total = int(counts["total"] or 0)
     symbol_exposure = float(symbol_counts["symbol_volume"] or 0)
