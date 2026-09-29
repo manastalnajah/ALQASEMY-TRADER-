@@ -151,6 +151,7 @@ def sync_account(
                 margin_level = CAST(:margin_level AS NUMERIC),
                 is_connected = :connected,
                 is_active = true,
+                is_trade_allowed = :is_trade_allowed,  # 🚀 تعديل 1: تحديث حالة التداول ديناميكياً
                 server = CASE WHEN server IS NULL OR server = '' OR server = 'unknown' THEN :server ELSE server END,
                 currency = COALESCE(:currency, currency),
                 leverage = COALESCE(:leverage, leverage),
@@ -169,6 +170,7 @@ def sync_account(
             "profit": account_data.profit,
             "margin_level": margin_level,
             "connected": account_data.is_connected,
+            "is_trade_allowed": getattr(account_data, "is_trade_allowed", True), # 🚀 تمرير قيمة تفعيل التداول
             "server": server_name,
             "currency": account_data.currency,
             "leverage": account_data.leverage,
@@ -187,7 +189,7 @@ def sync_account(
                 VALUES(
                     CAST(:account AS BIGINT), :server, CAST(:balance AS NUMERIC), CAST(:equity AS NUMERIC), 
                     CAST(:margin AS NUMERIC), CAST(:free_margin AS NUMERIC), CAST(:profit AS NUMERIC), 
-                    CAST(:margin_level AS NUMERIC), :connected, true, true,
+                    CAST(:margin_level AS NUMERIC), :connected, true, :is_trade_allowed,
                     COALESCE(:currency, 'USD'), COALESCE(:leverage, 500), :ea_id, :ea_version,
                     NOW(), NOW(), NOW(), NOW()
                 )
@@ -201,6 +203,7 @@ def sync_account(
                 "profit": account_data.profit,
                 "margin_level": margin_level,
                 "connected": account_data.is_connected,
+                "is_trade_allowed": getattr(account_data, "is_trade_allowed", True), # 🚀 تمرير قيمة التفعيل عند الإنشاء أيضاً
                 "currency": account_data.currency,
                 "leverage": account_data.leverage,
                 "ea_id": account_data.ea_id or "",
@@ -349,6 +352,7 @@ def check_candles_status(
             "timeframe": timeframe,
             "count": total,
             "latest_candle": str(latest) if latest else None,
+            "last_open_time": str(latest) if latest else "",  # 🚀 تعديل 2: إضافة المفتاح الذي يبحث عنه الإكسبيرت (MQL5)
             "ready": total >= 200
         }
     except Exception as exc:
@@ -359,11 +363,13 @@ def check_candles_status(
             "timeframe": timeframe,
             "count": 0,
             "latest_candle": None,
+            "last_open_time": "", # 🚀 إضافة المفتاح هنا لتفادي الخطأ في الحالات الاستثنائية
             "ready": False,
             "error": "Database temporarily busy"
         }
     finally:
         db.close()
+
 # ─── 5. Positions Sync ────────────────────────────────────────────────────────
 
 @router.post("/positions/sync")
@@ -540,6 +546,8 @@ def get_pending_commands(
                 "strategy_name": r["strategy_name"] or "",
                 "signal_key": r["signal_key"] or "",
                 "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+                "created_epoch": r["created_at"].timestamp() if r["created_at"] else 0, # 🚀 تعديل 3: إرسال وقت الإنشاء بصيغة Unix Timestamp ليقرأها MT5
+                "expires_epoch": 0, # 🚀 تعديل 4: تعيين 0 يعني عدم انتهاء الصلاحية من جهة السيرفر
                 "ea_id": r["ea_id"] or ""
             })
         return commands
