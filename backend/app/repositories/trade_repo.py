@@ -1,6 +1,7 @@
 import uuid
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.domain.models import TradeCommand
 from app.domain.schemas import CommandCreate
 from app.domain.interfaces.trade_repo_interface import ITradeRepository
@@ -11,8 +12,22 @@ class TradeRepository(ITradeRepository):
         self.db = db
 
     def create_trade_command(self, command: CommandCreate) -> TradeCommand:
+        """
+        إنشاء أمر تداول جديد مع حماية مطلقة ضد التكرار (Idempotency)
+        لتجنب خطأ قيد قاعدة البيانات عند تكرار فحص الإشارات لنفس الشمعة.
+        """
+        # 1. فحص مسبق: هل الأمر موجود مسبقاً بنفس الحساب ومفتاح الإشارة؟
+        existing = self.db.query(TradeCommand).filter(
+            TradeCommand.account_id == command.account_id,
+            TradeCommand.signal_key == command.signal_key
+        ).first()
+        
+        if existing:
+            return existing
+
+        # 2. إنشاء السجل الجديد في حال عدم وجوده
         db_command = TradeCommand(
-            account_id=command.account_id,  # [تحديث حرج]: ربط الأمر بالحساب لحل مشكلة قيد الـ Idempotency
+            account_id=command.account_id,
             symbol=command.symbol.upper(),
             order_type=command.order_type.upper(),
             lot_size=command.lot_size,
@@ -24,10 +39,22 @@ class TradeRepository(ITradeRepository):
             signal_key=command.signal_key,
             ea_id=command.ea_id,
         )
-        self.db.add(db_command)
-        self.db.commit()
-        self.db.refresh(db_command)
-        return db_command
+        
+        try:
+            self.db.add(db_command)
+            self.db.commit()
+            self.db.refresh(db_command)
+            return db_command
+        except IntegrityError:
+            # 3. شبكة أمان أخيرة لمعالجة سباق التزامن (Race Condition) بين العمليات المتزامنة
+            self.db.rollback()
+            existing = self.db.query(TradeCommand).filter(
+                TradeCommand.account_id == command.account_id,
+                TradeCommand.signal_key == command.signal_key
+            ).first()
+            if existing:
+                return existing
+            raise
 
     def get_pending_commands(self, limit: int = 10) -> list[TradeCommand]:
         return (self.db.query(TradeCommand)
@@ -59,7 +86,6 @@ class TradeRepository(ITradeRepository):
         except ValueError:
             return None
             
-        # [تحديث]: إضافة الحالات الجديدة (ignored, placed, partial, rejected) لتطابق EA v14.0
         allowed = {"pending", "processing", "executed", "partial", "placed", "failed", "cancelled", "expired", "ignored", "rejected"}
         status = new_status.lower()
         
