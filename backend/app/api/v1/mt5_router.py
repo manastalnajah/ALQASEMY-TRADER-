@@ -412,7 +412,7 @@ def sync_positions(
         db.close()
 
 
-# ─── 6. Pending Orders Sync ───────────────────────────────────────────────────
+# ─── 6. Pending Orders Sync (معدل ليتطابق 100% مع أعمدة قاعدة البيانات الحقيقية) ───────────────────────────────
 
 @router.post("/pending-orders/sync")
 def sync_pending_orders(
@@ -422,26 +422,37 @@ def sync_pending_orders(
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
+        # تفريغ الجدول أو تحديثه بما يتناسب مع البيانات الواردة
         db.execute(text("TRUNCATE TABLE pending_orders"))
+        
         for o in req.orders:
             db.execute(text("""
-                INSERT INTO pending_orders (ticket, symbol, order_type, volume, price, sl, tp, open_time, updated_at)
-                VALUES (:ticket, :sym, :type, :vol, :price, :sl, :tp, :open_time, NOW())
+                INSERT INTO pending_orders (
+                    ticket, account_number, symbol, side, volume, price_open, stop_loss, take_profit, updated_at
+                )
+                VALUES (
+                    :ticket, :account_number, :sym, :side, :vol, :price_open, :sl, :tp, :updated_at
+                )
             """), {
-                "ticket": o.ticket,
+                "ticket": str(o.ticket),
+                "account_number": req.account_number,
                 "sym": o.symbol,
-                "type": o.side,
+                "side": o.side,
                 "vol": o.volume,
-                "price": o.price_open,
+                "price_open": o.price_open,
                 "sl": o.stop_loss,
                 "tp": o.take_profit,
-                "open_time": o.updated_at or text("NOW()"),
+                "updated_at": o.updated_at or text("NOW()"),
             })
+            
         db.commit()
         return {"status": "success", "count": len(req.orders)}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Pending orders sync failed: %s", exc)
+        raise HTTPException(500, "Pending orders synchronization failed")
     finally:
         db.close()
-
 
 # ─── 7. Symbol Specs Sync ─────────────────────────────────────────────────────
 
