@@ -1,7 +1,7 @@
 import time
 import logging
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ تم التحديث لدعم AsyncSession
 from fastapi import HTTPException
 from app.config import config
 from app.domain import schemas
@@ -12,8 +12,9 @@ from app.services.risk_manager import validate_and_size
 # تم إضافة أوامر الـ STOP لتتطابق مع EA v14.0
 VALID_TYPES = {"BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"}
 
-def process_new_command(
-    db: Session, 
+# 🛠️ تحويل الدالة إلى async
+async def process_new_command(
+    db: AsyncSession,  # 🛠️ استخدام الجلسة غير المتزامنة
     command: schemas.CommandCreate, 
     account_id: str,  # إضافة إلزامية لتمرير هوية الحساب
     *, 
@@ -37,7 +38,8 @@ def process_new_command(
 
     # Manual/API commands are also protected. The strategy is never allowed to bypass this gate.
     if enforce_risk:
-        sized, reason = validate_and_size(
+        # 🛠️ استخدام await لانتظار محرك المخاطر (يفترض أن دالة validate_and_size تم/سيتم تحويلها لـ async)
+        sized, reason = await validate_and_size(
             db,
             account_id=account_id,  # تمرير الحساب ليتم الخصم/التحقق من risk_state الخاص به
             symbol=command.symbol,
@@ -58,11 +60,14 @@ def process_new_command(
 
     repo = TradeRepository(db)
     try:
-        command_obj = repo.create_trade_command(command)
+        # 🛠️ استخدام await لحفظ الأمر في قاعدة البيانات بشكل غير متزامن
+        command_obj = await repo.create_trade_command(command)
+        
         system_logger.info("✅ Command created: %s %s %.4f for account %s", 
                            command.symbol, command.order_type, command.lot_size, account_id)
         return command_obj
     except Exception as e:
-        db.rollback()
+        # 🛠️ الرول باك غير المتزامن
+        await db.rollback()
         system_logger.error("❌ Failed to save command: %s", str(e))
         raise
