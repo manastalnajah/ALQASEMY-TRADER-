@@ -13,16 +13,18 @@ from app.api.middleware.performance import PerformanceMiddleware
 
 logger = logging.getLogger("AlqasemyTrader")
 
-try:
-    initialize_database()
-    logger.info("Database initialization completed")
-except Exception:
-    logger.exception("Database initialization failed")
-    raise
-
-
+# 🛠️ تم نقل استدعاء initialize_database إلى داخل lifespan لأنه أصبح async
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. تهيئة قاعدة البيانات أولاً عند الإقلاع
+    try:
+        await initialize_database()  # 🛠️ استخدام await
+        logger.info("Database initialization completed successfully")
+    except Exception:
+        logger.exception("Database initialization failed")
+        raise
+
+    # 2. تشغيل عامل الخلفية (Trading Worker)
     worker_task = asyncio.create_task(start_background_worker())
     try:
         yield
