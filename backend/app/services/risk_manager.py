@@ -4,7 +4,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ التحديث لدعم الجلسة غير المتزامنة
 
 from app.config import config
 from app.logging.logger import system_logger
@@ -23,18 +23,20 @@ def _round_step(value: float, step: float) -> float:
     return math.floor((value / step) + 1e-12) * step
 
 
-def _account(db: Session, account_id: str):
+# 🛠️ تحويل إلى async
+async def _account(db: AsyncSession, account_id: str):
     """جلب الحساب بناءً على المعرف الفريد UUID وليس عشوائياً"""
-    return db.execute(text("""
+    return (await db.execute(text("""
         SELECT id AS account_id, account_number, balance, equity, margin, free_margin, margin_level,
                is_connected, last_heartbeat, last_sync
         FROM trading_accounts
         WHERE id = :account_id
-    """), {"account_id": account_id}).mappings().first()
+    """), {"account_id": account_id})).mappings().first()
 
 
-def _fresh_account(db: Session, account_id: str):
-    account = _account(db, account_id)
+# 🛠️ تحويل إلى async
+async def _fresh_account(db: AsyncSession, account_id: str):
+    account = await _account(db, account_id)  # 🛠️ انتظار النتيجة
     if not account:
         return None, "NO_ACCOUNT"
     if not account["is_connected"]:
@@ -57,70 +59,73 @@ def _fresh_account(db: Session, account_id: str):
     return account, None
 
 
-def _get_or_create_risk_state(db: Session, account_id: str, equity: float):
+# 🛠️ تحويل إلى async
+async def _get_or_create_risk_state(db: AsyncSession, account_id: str, equity: float):
     """إدارة حالة المخاطر بطريقة آمنة بالكامل"""
     day_key = _utcnow().strftime("%Y-%m-%d")
     
-    state = db.execute(text("""
+    state = (await db.execute(text("""
         SELECT * FROM risk_state 
         WHERE account_id = :account_id AND day_key = :day_key 
         FOR UPDATE
-    """), {"account_id": account_id, "day_key": day_key}).mappings().first()
+    """), {"account_id": account_id, "day_key": day_key})).mappings().first()
     
     if not state:
         try:
-            db.execute(text("""
+            await db.execute(text("""
                 INSERT INTO risk_state (account_id, day_key, day_start_equity, high_water_equity, trading_halted, halt_reason, updated_at)
                 VALUES (:account_id, :day_key, :equity, :equity, false, '', :now)
             """), {"account_id": account_id, "day_key": day_key, "equity": equity, "now": _utcnow()})
-            db.commit()
+            await db.commit()
         except Exception as insert_err:
-            db.rollback() 
+            await db.rollback() 
             system_logger.debug(f"Risk state insert handled gracefully: {insert_err}")
             
-        state = db.execute(text("""
+        state = (await db.execute(text("""
             SELECT * FROM risk_state 
             WHERE account_id = :account_id AND day_key = :day_key
             FOR UPDATE
-        """), {"account_id": account_id, "day_key": day_key}).mappings().first()
+        """), {"account_id": account_id, "day_key": day_key})).mappings().first()
         
         if not state:
             return {"day_key": day_key, "day_start_equity": equity, "high_water_equity": equity, "trading_halted": False, "halt_reason": ""}
 
     high = max(float(state["high_water_equity"] or equity), equity)
     if high != float(state["high_water_equity"] or 0):
-        db.execute(text("""
+        await db.execute(text("""
             UPDATE risk_state SET high_water_equity=:high, updated_at=:now 
             WHERE account_id=:account_id AND day_key=:day_key
         """), {"high": high, "now": _utcnow(), "account_id": account_id, "day_key": day_key})
-        db.commit()
+        await db.commit()
         
     return dict(state, high_water_equity=high)
 
 
-def _active_counts(db: Session, account_id: str, account_number: int, symbol: str):
+# 🛠️ تحويل إلى async
+async def _active_counts(db: AsyncSession, account_id: str, account_number: int, symbol: str):
     """فصل الأوامر والصفقات المعلقة لمنع التداخل (تم التحديث ليتوافق مع الجداول الجديدة)"""
-    command_row = db.execute(text("""
+    command_row = (await db.execute(text("""
         SELECT COUNT(*) AS pending
         FROM trade_commands
         WHERE account_id=:account_id AND symbol=:symbol AND status IN ('pending','processing')
-    """), {"account_id": account_id, "symbol": symbol}).mappings().first()
+    """), {"account_id": account_id, "symbol": symbol})).mappings().first()
     
     # استخدام الجدول الصحيح pending_orders
-    live_pending = db.execute(text("""
+    live_pending = (await db.execute(text("""
         SELECT COUNT(*) AS pending
         FROM pending_orders WHERE symbol=:symbol
-    """), {"symbol": symbol}).mappings().first()
+    """), {"symbol": symbol})).mappings().first()
     
     return int(command_row["pending"] or 0) + int(live_pending["pending"] or 0)
 
 
-def _symbol_spec(db: Session, symbol: str):
-    return db.execute(text("""
+# 🛠️ تحويل إلى async
+async def _symbol_spec(db: AsyncSession, symbol: str):
+    return (await db.execute(text("""
         SELECT symbol, digits, point, tick_size, tick_value,
                volume_min, volume_max, volume_step, stops_level_points, contract_size
         FROM symbol_specs WHERE symbol=:symbol
-    """), {"symbol": symbol}).mappings().first()
+    """), {"symbol": symbol})).mappings().first()
 
 
 def calculate_position_size(equity: float, risk_pct: float, entry: float, stop: float, spec) -> float:
@@ -155,7 +160,8 @@ def calculate_position_size(equity: float, risk_pct: float, entry: float, stop: 
     return min(lot, maximum)
 
 
-def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: str, entry: float, stop: float, target: float, signal_key: str):
+# 🛠️ تحويل الدالة الرئيسية إلى async
+async def validate_and_size(db: AsyncSession, *, account_id: str, symbol: str, order_type: str, entry: float, stop: float, target: float, signal_key: str):
     symbol = symbol.upper()
     order_type = order_type.upper()
     
@@ -166,9 +172,9 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
         return None, "SL_TP_REQUIRED"
 
     lock_key = f"ALQASEMY:{account_id}:{symbol}"
-    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
 
-    duplicate = db.execute(text("""
+    duplicate = (await db.execute(text("""
         SELECT id FROM trade_commands
         WHERE account_id=:account_id 
           AND symbol=:symbol
@@ -176,22 +182,22 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
           AND status IN ('pending','processing')
           AND ABS(COALESCE(entry_price,0) - :entry) < :epsilon
         LIMIT 1
-    """), {"account_id": account_id, "symbol": symbol, "order_type": order_type, "entry": entry, "epsilon": max(abs(entry) * 1e-6, 1e-8)}).first()
+    """), {"account_id": account_id, "symbol": symbol, "order_type": order_type, "entry": entry, "epsilon": max(abs(entry) * 1e-6, 1e-8)})).first()
     if duplicate:
         return None, "DUPLICATE_ACTIVE_COMMAND"
 
-    recent = db.execute(text("""
+    recent = (await db.execute(text("""
         SELECT id FROM trade_commands
         WHERE account_id=:account_id 
           AND symbol=:symbol AND status NOT IN ('cancelled','expired','failed')
           AND created_at >= NOW() - (:minutes * INTERVAL '1 minute')
           AND COALESCE(signal_key,'') = :signal_key
         LIMIT 1
-    """), {"account_id": account_id, "symbol": symbol, "minutes": config.signal_cooldown_minutes, "signal_key": signal_key}).first()
+    """), {"account_id": account_id, "symbol": symbol, "minutes": config.signal_cooldown_minutes, "signal_key": signal_key})).first()
     if recent:
         return None, "DUPLICATE_SIGNAL"
 
-    account, reason = _fresh_account(db, account_id)
+    account, reason = await _fresh_account(db, account_id)
     if not account:
         return None, reason
         
@@ -208,7 +214,7 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
     if margin > 0 and ((margin / equity) * 100.0) > config.max_margin_usage_pct:
         return None, "HIGH_MARGIN_USAGE"
 
-    state = _get_or_create_risk_state(db, account_id, equity)
+    state = await _get_or_create_risk_state(db, account_id, equity)
     if state["trading_halted"]:
         return None, f"RISK_HALTED:{state['halt_reason']}"
 
@@ -216,30 +222,28 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
     drawdown_pct = max(0.0, (float(state["high_water_equity"]) - equity) / float(state["high_water_equity"]) * 100.0) if state["high_water_equity"] else 0.0
     
     if daily_loss_pct >= config.max_daily_loss_pct:
-        db.execute(text("""
+        await db.execute(text("""
             UPDATE risk_state SET trading_halted=true, halt_reason=:reason, updated_at=:now 
             WHERE account_id=:account_id AND day_key=:day_key
         """), {"reason": "DAILY_LOSS_LIMIT", "now": _utcnow(), "account_id": account_id, "day_key": state["day_key"]})
         return None, "DAILY_LOSS_LIMIT"
         
     if drawdown_pct >= config.max_drawdown_pct:
-        db.execute(text("""
+        await db.execute(text("""
             UPDATE risk_state SET trading_halted=true, halt_reason=:reason, updated_at=:now 
             WHERE account_id=:account_id AND day_key=:day_key
         """), {"reason": "MAX_DRAWDOWN", "now": _utcnow(), "account_id": account_id, "day_key": state["day_key"]})
         return None, "MAX_DRAWDOWN"
 
-    # 🚀 تم إزالة كود الـ STALE الخاطئ الذي كان يوقف الصفقات
-    # وتم تصحيح الجدول إلى open_positions كما هو في الـ Router
-    counts = db.execute(text("""
+    counts = (await db.execute(text("""
         SELECT COUNT(*) AS total
         FROM open_positions
-    """)).mappings().first()
+    """))).mappings().first()
     
-    symbol_counts = db.execute(text("""
+    symbol_counts = (await db.execute(text("""
         SELECT COALESCE(SUM(volume),0) AS symbol_volume
         FROM open_positions WHERE symbol=:symbol
-    """), {"symbol": symbol}).mappings().first()
+    """), {"symbol": symbol})).mappings().first()
     
     open_total = int(counts["total"] or 0)
     symbol_exposure = float(symbol_counts["symbol_volume"] or 0)
@@ -248,11 +252,11 @@ def validate_and_size(db: Session, *, account_id: str, symbol: str, order_type: 
     if symbol_exposure >= config.max_symbol_exposure_lots:
         return None, "MAX_SYMBOL_EXPOSURE"
 
-    pending = _active_counts(db, account_id, account_number, symbol)
+    pending = await _active_counts(db, account_id, account_number, symbol)
     if pending >= config.max_pending_orders:
         return None, "MAX_PENDING_ORDERS"
 
-    spec = _symbol_spec(db, symbol)
+    spec = await _symbol_spec(db, symbol)
     if not spec:
         return None, "SYMBOL_SPEC_MISSING"
 
