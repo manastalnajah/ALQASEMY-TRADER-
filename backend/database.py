@@ -15,10 +15,14 @@ engine = create_async_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=1800,
-    # 🛠️ تم رفع سعة الاتصالات لإنهاء خطأ QueuePool limit تماماً
     pool_size=int(os.getenv("DB_POOL_SIZE", "40")),
     max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "60")),
-    pool_timeout=60, # 🛠️ إضافة مهلة انتظار أطول للطلبات المزدحمة
+    pool_timeout=60,
+    # 🚀 الحل السحري والنهائي لمشكلة Supabase مع asyncpg
+    connect_args={
+        "prepared_statement_cache_size": 0,
+        "statement_cache_size": 0
+    }
 )
 
 # 🛠️ إنشاء مصنع الجلسات غير المتزامنة
