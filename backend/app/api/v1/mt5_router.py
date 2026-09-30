@@ -1,10 +1,12 @@
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Header, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, Header, HTTPException, BackgroundTasks, Request, Depends
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
-from database import SessionLocal
+# 🛠️ استخدام أدوات قاعدة البيانات غير المتزامنة
+from database import AsyncSessionLocal, get_db
 from app.config import config
 from app.domain import schemas
 from app.services.strategy_evaluator import evaluate_and_execute_strategy
@@ -47,108 +49,112 @@ def _authorize(x_mt5_key: Optional[str]):
             raise HTTPException(401, "Invalid or missing MT5 authentication key")
 
 
-def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schemas.CandleItem, ea_id: str):
-    db = SessionLocal()
-    try:
-        bot_state_record = db.execute(
-            text("SELECT is_running FROM bot_state WHERE id = 1 LIMIT 1")
-        ).mappings().first()
+# 🛠️ تحويل دالة الخلفية لتكون Async
+async def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schemas.CandleItem, ea_id: str):
+    # 🛠️ الإدارة الآمنة للجلسة في مهام الخلفية
+    async with AsyncSessionLocal() as db:
+        try:
+            bot_state_record = (await db.execute(
+                text("SELECT is_running FROM bot_state WHERE id = 1 LIMIT 1")
+            )).mappings().first()
 
-        if bot_state_record and not bot_state_record["is_running"]:
-            return
+            if bot_state_record and not bot_state_record["is_running"]:
+                return
 
-        account = db.execute(
-            text("""
-                SELECT id, account_number, balance, equity, currency 
-                FROM trading_accounts 
-                WHERE ea_id = :ea_id AND is_active = true AND is_trade_allowed = true
-                ORDER BY updated_at DESC LIMIT 1
-            """),
-            {"ea_id": ea_id}
-        ).mappings().first()
-
-        if not account:
-            account = db.execute(
+            # 🚀 جلب الحساب الحقيقي النشط فقط دون أي قيم وهمية
+            account = (await db.execute(
                 text("""
                     SELECT id, account_number, balance, equity, currency 
                     FROM trading_accounts 
-                    WHERE is_active = true AND is_trade_allowed = true
+                    WHERE ea_id = :ea_id AND is_active = true AND is_trade_allowed = true
                     ORDER BY updated_at DESC LIMIT 1
-                """)
-            ).mappings().first()
+                """),
+                {"ea_id": ea_id}
+            )).mappings().first()
 
-        if not account:
-            logger.warning(f"⚠️ Strategy execution skipped: No active trading account found for EA ID: {ea_id}")
-            return
+            if not account:
+                account = (await db.execute(
+                    text("""
+                        SELECT id, account_number, balance, equity, currency 
+                        FROM trading_accounts 
+                        WHERE is_active = true AND is_trade_allowed = true
+                        ORDER BY updated_at DESC LIMIT 1
+                    """)
+                )).mappings().first()
 
-        account_id = str(account["id"])
+            if not account:
+                logger.warning(f"⚠️ Strategy execution skipped: No active trading account found for EA ID: {ea_id}")
+                return
 
-        real_balance = float(account["balance"] or 0.0)
-        real_equity = float(account["equity"] or 0.0)
-        if real_balance <= 0:
-            logger.error(f"🛑 CRITICAL: Real balance is zero or negative for account {account['account_number']}. Blocking strategy.")
-            return
+            account_id = str(account["id"])
 
-        spec = db.execute(
-            text("SELECT tick_size, tick_value, point, digits FROM symbol_specs WHERE symbol = :sym LIMIT 1"),
-            {"sym": symbol}
-        ).mappings().first()
+            # 🚀 التحقق من توفر الرصيد الحقيقي (حماية ضد الحسابات غير المتزامنة)
+            real_balance = float(account["balance"] or 0.0)
+            real_equity = float(account["equity"] or 0.0)
+            if real_balance <= 0:
+                logger.error(f"🛑 CRITICAL: Real balance is zero or negative for account {account['account_number']}. Blocking strategy.")
+                return
 
-        tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
-        tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
+            spec = (await db.execute(
+                text("SELECT tick_size, tick_value, point, digits FROM symbol_specs WHERE symbol = :sym LIMIT 1"),
+                {"sym": symbol}
+            )).mappings().first()
 
-        market_data = {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "open_time": str(latest_candle.open_time),
-            "open": float(latest_candle.open),
-            "high": float(latest_candle.high),
-            "low": float(latest_candle.low),
-            "close": float(latest_candle.close),
-            "volume": float(latest_candle.volume),
-            "balance": real_balance,
-            "equity": real_equity,
-            "tick_size": tick_size,
-            "tick_value": tick_value,
-            "ea_id": ea_id,
-            "candle_key": str(latest_candle.open_time),
-        }
+            tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
+            tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
 
-        strategy_to_run = getattr(config, "default_strategy", "golden_setup")
+            # 🚀 حقن رأس المال الحقيقي بالكامل دون أي افتراضات وهمية
+            market_data = {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open_time": str(latest_candle.open_time),
+                "open": float(latest_candle.open),
+                "high": float(latest_candle.high),
+                "low": float(latest_candle.low),
+                "close": float(latest_candle.close),
+                "volume": float(latest_candle.volume),
+                "balance": real_balance,
+                "equity": real_equity,
+                "tick_size": tick_size,
+                "tick_value": tick_value,
+                "ea_id": ea_id,
+                "candle_key": str(latest_candle.open_time),
+            }
 
-        result = evaluate_and_execute_strategy(
-            db=db,
-            account_id=account_id,
-            strategy_name=strategy_to_run,
-            market_data=market_data,
-        )
+            strategy_to_run = getattr(config, "default_strategy", "golden_setup")
 
-        decision = result.get("decision", "HOLD")
-        if decision != "HOLD":
-            logger.info(f"🎯 Signal: {decision} on {symbol} | Account: {account['account_number']} | Real Balance: {real_balance}")
+            # 🛠️ انتظار انتهاء الاستراتيجية
+            result = await evaluate_and_execute_strategy(
+                db=db,
+                account_id=account_id,
+                strategy_name=strategy_to_run,
+                market_data=market_data,
+            )
 
-    except Exception as e:
-        logger.exception(f"❌ Strategy Execution error: {e}")
-    finally:
-        db.close()
+            decision = result.get("decision", "HOLD")
+            if decision != "HOLD":
+                logger.info(f"🎯 Signal: {decision} on {symbol} | Account: {account['account_number']} | Real Balance: {real_balance}")
+
+        except Exception as e:
+            logger.exception(f"❌ Strategy Execution error: {e}")
 
 
 # ─── 1. Account Sync ──────────────────────────────────────────────────────────
 
 @router.post("/account/sync")
-def sync_account(
+async def sync_account(
     account_data: schemas.AccountHeartbeat, 
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
         margin_level = account_data.margin_level if account_data.margin_level is not None else (
             account_data.equity / account_data.margin * 100 if account_data.margin > 0 else 0
         )
         server_name = account_data.server or "unknown"
 
-        result = db.execute(text("""
+        result = (await db.execute(text("""
             UPDATE trading_accounts 
             SET balance = CAST(:balance AS NUMERIC),
                 equity = CAST(:equity AS NUMERIC),
@@ -184,10 +190,10 @@ def sync_account(
             "ea_id": account_data.ea_id or "",
             "ea_version": account_data.ea_version or "",
             "account": account_data.account_number,
-        }).first()
+        })).first()
 
         if not result:
-            db.execute(text("""
+            await db.execute(text("""
                 INSERT INTO trading_accounts(
                     account_number, server, balance, equity, margin, free_margin, 
                     profit, margin_level, is_connected, is_active, is_trade_allowed,
@@ -216,30 +222,28 @@ def sync_account(
                 "ea_id": account_data.ea_id or "",
                 "ea_version": account_data.ea_version or ""
             })
-        db.commit()
+        await db.commit()
         return {"status": "success", "account_number": account_data.account_number}
     except Exception as exc:
-        db.rollback()
+        await db.rollback()
         logger.exception("Account sync failed: %s", exc)
         raise HTTPException(500, "Account synchronization failed")
-    finally:
-        db.close()
 
 
 # ─── 2. Heartbeat ─────────────────────────────────────────────────────────────
 
 @router.post("/heartbeat")
-def account_heartbeat(
+async def account_heartbeat(
     account_data: schemas.AccountHeartbeat, 
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
         margin_level = account_data.margin_level if account_data.margin_level is not None else (
             account_data.equity / account_data.margin * 100 if account_data.margin > 0 else 0
         )
-        db.execute(text("""
+        await db.execute(text("""
             UPDATE trading_accounts 
             SET balance = CAST(:balance AS NUMERIC),
                 equity = CAST(:equity AS NUMERIC),
@@ -267,60 +271,59 @@ def account_heartbeat(
             "ea_version": account_data.ea_version or "",
             "account": account_data.account_number
         })
-        db.commit()
+        await db.commit()
         return {"status": "success", "account_number": account_data.account_number}
-    finally:
-        db.close()
-
-
-# ─── 3. Candles Sync ──────────────────────────────────────────────────────────
-
-def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
-    db = SessionLocal()
-    try:
-        parameters = [{
-            "sym": req.symbol,
-            "tf": req.timeframe,
-            "ot": candle.open_time,
-            "o": candle.open,
-            "h": candle.high,
-            "l": candle.low,
-            "c": candle.close,
-            "v": candle.volume
-        } for candle in req.candles]
-
-        chunk_size = 100
-        for i in range(0, len(parameters), chunk_size):
-            chunk = parameters[i:i + chunk_size]
-            db.execute(text("""
-                INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
-                VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
-                ON CONFLICT (symbol_name, timeframe, open_time) 
-                DO UPDATE SET 
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume
-            """), chunk)
-            db.commit() 
-
-        latest = req.candles[-1]
-        run_strategy_in_background(
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            latest_candle=latest,
-            ea_id=ea_id
-        )
     except Exception as exc:
-        db.rollback()
-        logger.exception("Background Candles sync failed: %s", exc)
-    finally:
-        db.close()
+        await db.rollback()
+        raise HTTPException(500, "Heartbeat failed")
+
+
+# ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد والاختناق) ───────────────
+
+async def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
+    async with AsyncSessionLocal() as db:
+        try:
+            parameters = [{
+                "sym": req.symbol,
+                "tf": req.timeframe,
+                "ot": candle.open_time,
+                "o": candle.open,
+                "h": candle.high,
+                "l": candle.low,
+                "c": candle.close,
+                "v": candle.volume
+            } for candle in req.candles]
+
+            chunk_size = 100
+            for i in range(0, len(parameters), chunk_size):
+                chunk = parameters[i:i + chunk_size]
+                await db.execute(text("""
+                    INSERT INTO candles (symbol_name, timeframe, open_time, open, high, low, close, volume, created_at)
+                    VALUES (:sym, :tf, :ot, :o, :h, :l, :c, :v, NOW())
+                    ON CONFLICT (symbol_name, timeframe, open_time) 
+                    DO UPDATE SET 
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume
+                """), chunk)
+                await db.commit() 
+
+            latest = req.candles[-1]
+            await run_strategy_in_background(
+                symbol=req.symbol,
+                timeframe=req.timeframe,
+                latest_candle=latest,
+                ea_id=ea_id
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.exception("Background Candles sync failed: %s", exc)
 
 
 @router.post("/candles/sync")
-def sync_candles(
+async def sync_candles(
     req: schemas.CandlesSyncRequest,
     background_tasks: BackgroundTasks,
     x_mt5_key: Optional[str] = Header(default=None)
@@ -330,26 +333,28 @@ def sync_candles(
         return {"status": "ignored", "count": 0}
 
     ea_id = req.ea_id or "MT5-ALQASEMY-01"
+    
+    # BackgroundTasks في FastAPI تدعم الدوال الـ async بشكل مثالي
     background_tasks.add_task(process_candles_background_task, req, ea_id)
+    
     return {"status": "success", "count": len(req.candles), "message": "processing in background chunks"}
-
 
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
 
 @router.get("/candles/status")
-def check_candles_status(
+async def check_candles_status(
     symbol: str,
     timeframe: str,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        row = db.execute(text("""
+        row = (await db.execute(text("""
             SELECT COUNT(*) AS total, MAX(open_time) AS latest 
             FROM candles 
             WHERE symbol_name = :sym AND timeframe = :tf
-        """), {"sym": symbol, "tf": timeframe}).mappings().first()
+        """), {"sym": symbol, "tf": timeframe})).mappings().first()
 
         total = row["total"] if row else 0
         latest = row["latest"] if row else None
@@ -372,23 +377,20 @@ def check_candles_status(
             "ready": False,
             "error": "Database temporarily busy"
         }
-    finally:
-        db.close()
-
 
 # ─── 5. Positions Sync ────────────────────────────────────────────────────────
 
 @router.post("/positions/sync")
-def sync_positions(
+async def sync_positions(
     req: schemas.PositionsSyncRequest,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        db.execute(text("TRUNCATE TABLE open_positions"))
+        await db.execute(text("TRUNCATE TABLE open_positions"))
         for pos in req.positions:
-            db.execute(text("""
+            await db.execute(text("""
                 INSERT INTO open_positions (ticket, symbol, position_type, volume, open_price, current_price, sl, tp, profit, open_time, updated_at)
                 VALUES (:ticket, :sym, :type, :vol, :open_p, :curr_p, :sl, :tp, :profit, :open_time, NOW())
             """), {
@@ -403,25 +405,28 @@ def sync_positions(
                 "profit": pos.profit,
                 "open_time": pos.updated_at or text("NOW()"),
             })
-        db.commit()
+        await db.commit()
         return {"status": "success", "count": len(req.positions)}
-    finally:
-        db.close()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(500, "Sync Positions Failed")
 
 
-# ─── 6. Pending Orders Sync ───────────────────────────────────────────────────
+# ─── 6. Pending Orders Sync (معدل ليتطابق 100% مع أعمدة قاعدة البيانات الحقيقية) ───────────────────────────────
 
 @router.post("/pending-orders/sync")
-def sync_pending_orders(
+async def sync_pending_orders(
     req: schemas.PendingOrdersSyncRequest,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        db.execute(text("TRUNCATE TABLE pending_orders"))
+        # تفريغ الجدول أو تحديثه بما يتناسب مع البيانات الواردة
+        await db.execute(text("TRUNCATE TABLE pending_orders"))
+        
         for o in req.orders:
-            db.execute(text("""
+            await db.execute(text("""
                 INSERT INTO pending_orders (
                     ticket, account_number, symbol, side, volume, price_open, stop_loss, take_profit, updated_at
                 )
@@ -439,29 +444,27 @@ def sync_pending_orders(
                 "tp": o.take_profit,
                 "updated_at": o.updated_at or text("NOW()"),
             })
-        db.commit()
+            
+        await db.commit()
         return {"status": "success", "count": len(req.orders)}
     except Exception as exc:
-        db.rollback()
+        await db.rollback()
         logger.exception("Pending orders sync failed: %s", exc)
         raise HTTPException(500, "Pending orders synchronization failed")
-    finally:
-        db.close()
-
 
 # ─── 7. Symbol Specs Sync ─────────────────────────────────────────────────────
 
 @router.post("/specs/sync")
-def sync_symbol_specs(
+async def sync_symbol_specs(
     request: Request,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        import asyncio
+        # 🛠️ استخدام القراءة المباشرة وغير المتزامنة من Request (تنظيف الكود)
         try:
-            raw_json = asyncio.run(request.json())
+            raw_json = await request.json()
         except Exception:
             raw_json = request._json if hasattr(request, "_json") else {}
 
@@ -487,7 +490,7 @@ def sync_symbol_specs(
             max_lot = float(s.get("max_lot") or s.get("volume_max") or 100.0)
             lot_step = float(s.get("lot_step") or s.get("volume_step") or 0.01)
 
-            db.execute(text("""
+            await db.execute(text("""
                 INSERT INTO symbol_specs (symbol, point, digits, spread, tick_value, tick_size, contract_size, min_lot, max_lot, lot_step, updated_at)
                 VALUES (:sym, :point, :digits, :spread, :tv, :ts, :cs, :min_l, :max_l, :step, NOW())
                 ON CONFLICT (symbol) DO UPDATE SET
@@ -515,35 +518,33 @@ def sync_symbol_specs(
             })
             count += 1
             
-        db.commit()
+        await db.commit()
         return {"status": "success", "count": count}
     except Exception as exc:
-        db.rollback()
+        await db.rollback()
         logger.exception("Specs sync failed: %s", exc)
         raise HTTPException(500, "Specs synchronization failed")
-    finally:
-        db.close()
 
 
 # ─── 8. Commands Polling, ACK & Execution Report ──────────────────────────────
 
 @router.get("/commands")
-def get_pending_commands(
+async def get_pending_commands(
     limit: int = 10,
     ea_id: Optional[str] = None,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        rows = db.execute(text("""
+        rows = (await db.execute(text("""
             SELECT id, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id, strategy_name, signal_key, created_at
             FROM trade_commands
             WHERE status = 'pending'
               AND (CAST(:ea_id AS TEXT) IS NULL OR ea_id = '' OR ea_id = CAST(:ea_id AS TEXT))
             ORDER BY created_at ASC
             LIMIT :limit
-        """), {"ea_id": ea_id, "limit": limit}).mappings().all()
+        """), {"ea_id": ea_id, "limit": limit})).mappings().all()
 
         commands = []
         for r in rows:
@@ -566,45 +567,44 @@ def get_pending_commands(
                 "ea_id": r["ea_id"] or ""
             })
         return commands
-    finally:
-        db.close()
+    except Exception as exc:
+        raise HTTPException(500, "Failed to get commands")
 
 
 @router.post("/commands/{command_id}/ack")
-def acknowledge_command(
+async def acknowledge_command(
     command_id: str,
     payload: CommandAck,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    db = SessionLocal()
     try:
-        db.execute(text("""
+        await db.execute(text("""
             UPDATE trade_commands
             SET status = 'processing', updated_at = NOW()
             WHERE id = CAST(:cmd_id AS UUID) AND status = 'pending'
         """), {"cmd_id": command_id})
-        db.commit()
+        await db.commit()
         return {"status": "success", "command_id": command_id}
     except Exception as exc:
-        db.rollback()
+        await db.rollback()
         logger.exception("Ack failed: %s", exc)
         raise HTTPException(500, "Ack failed")
-    finally:
-        db.close()
 
 
 @router.post("/commands/{command_id}/report")
-def report_execution_single(
+async def report_execution_single(
     command_id: str,
     report: CommandReport,
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    dbSession = SessionLocal()
     try:
         ticket_val = report.mt5_ticket or report.mt5_order_ticket or report.mt5_deal_ticket
-        dbSession.execute(text("""
+        
+        await db.execute(text("""
             UPDATE trade_commands
             SET status = :status,
                 mt5_ticket = :ticket_val,
@@ -623,27 +623,25 @@ def report_execution_single(
             "err": report.error_message or "",
             "cmd_id": command_id
         })
-        dbSession.commit()
+        await db.commit()
         return {"status": "success"}
     except Exception as exc:
-        dbSession.rollback()
+        await db.rollback()
         logger.exception("Report execution failed: %s", exc)
         raise HTTPException(500, "Report execution failed")
-    finally:
-        dbSession.close()
 
 
 @router.post("/reports")
-def report_execution(
+async def report_execution(
     reports: List[schemas.CommandReportRequest],
-    x_mt5_key: Optional[str] = Header(default=None)
+    x_mt5_key: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db)
 ):
     _authorize(x_mt5_key)
-    dbSession = SessionLocal()
     try:
         for rep in reports:
             ticket_val = rep.mt5_ticket or rep.mt5_order_ticket or rep.mt5_deal_ticket
-            dbSession.execute(text("""
+            await db.execute(text("""
                 UPDATE trade_commands
                 SET status = :status,
                     mt5_ticket = :ticket_val,
@@ -656,87 +654,9 @@ def report_execution(
                 "err": rep.error_message or "",
                 "cmd_id": rep.command_id if hasattr(rep, "command_id") else None
             })
-        dbSession.commit()
+        await db.commit()
         return {"status": "success", "count": len(reports)}
     except Exception as exc:
-        dbSession.rollback()
+        await db.rollback()
         logger.exception("Report execution failed: %s", exc)
         raise HTTPException(500, "Report execution failed")
-    finally:
-        dbSession.close()
-
-
-# ─── 9. History Sync (أرشيف الصفقات المغلقة) ──────────────────────────────────
-
-@router.post("/history/sync")
-def sync_trade_history(
-    req: schemas.HistorySyncRequest,
-    x_mt5_key: Optional[str] = Header(default=None)
-):
-    _authorize(x_mt5_key)
-    if not req.deals:
-        return {"status": "success", "count": 0}
-
-    db = SessionLocal()
-    try:
-        inserted = 0
-        for d in req.deals:
-            cmd_id = ""
-            strat_name = ""
-            if d.comment and "AQ|" in d.comment:
-                cmd_id = d.comment.replace("AQ|", "").strip()
-                cmd = db.execute(
-                    text("SELECT strategy_name FROM trade_commands WHERE id::text LIKE :cid LIMIT 1"),
-                    {"cid": f"{cmd_id}%"}
-                ).mappings().first()
-                if cmd:
-                    strat_name = cmd["strategy_name"]
-
-            db.execute(text("""
-                INSERT INTO trade_history (
-                    deal_ticket, order_ticket, position_ticket, account_number,
-                    symbol, side, volume, open_price, close_price, sl, tp,
-                    profit, commission, swap, magic, comment, command_id,
-                    strategy_name, open_time, close_time, created_at
-                ) VALUES (
-                    :deal_ticket, :order_ticket, :position_ticket, :account,
-                    :symbol, :side, :volume, :open_price, :close_price, :sl, :tp,
-                    :profit, :commission, :swap, :magic, :comment, :cmd_id,
-                    :strat_name, :open_time, :close_time, NOW()
-                )
-                ON CONFLICT (deal_ticket) DO UPDATE SET
-                    profit = EXCLUDED.profit,
-                    close_price = EXCLUDED.close_price,
-                    close_time = EXCLUDED.close_time
-            """), {
-                "deal_ticket": d.deal_ticket,
-                "order_ticket": d.order_ticket,
-                "position_ticket": d.position_ticket,
-                "account": req.account_number,
-                "symbol": d.symbol,
-                "side": d.side,
-                "volume": d.volume,
-                "open_price": d.open_price,
-                "close_price": d.close_price,
-                "sl": d.sl,
-                "tp": d.tp,
-                "profit": d.profit,
-                "commission": d.commission,
-                "swap": d.swap,
-                "magic": req.magic,
-                "comment": d.comment,
-                "cmd_id": cmd_id,
-                "strat_name": strat_name,
-                "open_time": d.open_time,
-                "close_time": d.close_time,
-            })
-            inserted += 1
-
-        db.commit()
-        return {"status": "success", "count": inserted}
-    except Exception as exc:
-        db.rollback()
-        logger.exception("History sync failed: %s", exc)
-        raise HTTPException(500, "Trade history sync failed")
-    finally:
-        db.close()
