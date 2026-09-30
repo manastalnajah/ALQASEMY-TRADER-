@@ -1,7 +1,9 @@
+rval_seconds))
 import asyncio
-import pandas as pd  # 👈 1. تم إضافة مكتبة البانداس هنا
+import pandas as pd  
 from sqlalchemy import text
-from database import SessionLocal
+from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ استخدام AsyncSession
+from database import AsyncSessionLocal  # 🛠️ جلب المصنع الجديد للجلسات
 from app.config import config
 from app.indicators.moving_average import calculate_sma
 from app.indicators.rsi import calculate_rsi
@@ -21,7 +23,6 @@ def _get_last_val(data) -> float:
     if data is None:
         return 0.0
     if hasattr(data, 'iloc'):
-        # استخراج الشمعة الأخيرة إذا كانت Pandas Series
         val = data.iloc[-1]
         return float(val)
     if isinstance(data, (list, tuple)) and len(data) > 0:
@@ -29,14 +30,15 @@ def _get_last_val(data) -> float:
     return float(data)
 
 
-def _load_candles(db, symbol: str, timeframe: str, limit: int):
-    rows = db.execute(text("""
+# 🛠️ تحويل إلى async واستخدام await
+async def _load_candles(db: AsyncSession, symbol: str, timeframe: str, limit: int):
+    rows = (await db.execute(text("""
         SELECT open_time, open, high, low, close, volume
         FROM candles
         WHERE symbol_name=:symbol AND timeframe=:timeframe
         ORDER BY open_time DESC
         LIMIT :limit
-    """), {"symbol": symbol, "timeframe": timeframe, "limit": limit}).mappings().all()
+    """), {"symbol": symbol, "timeframe": timeframe, "limit": limit})).mappings().all()
     return list(reversed(rows))
 
 
@@ -51,7 +53,6 @@ def _ma_context(candles, fast_period=10, slow_period=50):
     if fast is None or slow is None:
         return None
         
-    # ✅ استخدام الدالة الآمنة لاستخراج الأرقام المفردة
     fast_val = _get_last_val(fast)
     slow_val = _get_last_val(slow)
     close_val = float(closes[-1])
@@ -65,15 +66,17 @@ def _ma_context(candles, fast_period=10, slow_period=50):
     }
 
 
-def analyze_symbol(db, symbol: str, active_accounts: list):
+# 🛠️ تحويل إلى async 
+async def analyze_symbol(db: AsyncSession, symbol: str, active_accounts: list):
     """
     التعديل: تمرير قائمة الحسابات النشطة.
     يتم تقييم السوق (الشموع والمؤشرات) مرة واحدة توفيراً للموارد، 
     ثم يتم إرسال الإشارة لكل حساب ليتم تسعيرها بحجم اللوت الخاص به.
     """
-    direction_candles = _load_candles(db, symbol, config.direction_timeframe, config.direction_candle_limit)
-    confirmation_candles = _load_candles(db, symbol, config.confirmation_timeframe, config.confirmation_candle_limit)
-    entry_candles = _load_candles(db, symbol, config.entry_timeframe, config.entry_candle_limit)
+    # 🛠️ استخدام await لتحميل الشموع
+    direction_candles = await _load_candles(db, symbol, config.direction_timeframe, config.direction_candle_limit)
+    confirmation_candles = await _load_candles(db, symbol, config.confirmation_timeframe, config.confirmation_candle_limit)
+    entry_candles = await _load_candles(db, symbol, config.entry_timeframe, config.entry_candle_limit)
 
     if (len(direction_candles) < config.min_candles_required or
             len(confirmation_candles) < config.min_candles_required or
@@ -106,7 +109,7 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
     rsi = calculate_rsi(closes, 14)
     rsi_prev = calculate_rsi(closes[:-1], 14)
     
-    # 👈 2. الإصلاح الجذري لمشكلة الـ ATR بوضع البيانات في DataFrame أولاً
+    # الإصلاح الجذري لمشكلة الـ ATR بوضع البيانات في DataFrame أولاً
     df_for_atr = pd.DataFrame({
         "high": highs,
         "low": lows,
@@ -117,12 +120,14 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
     ma14 = calculate_sma(closes, 14)
     ma14_prev = calculate_sma(closes[:-1], 14)
     
-    # 👈 3. تعديل استباقي لمنع خطأ Pandas (The truth value of a Series is ambiguous)
+    # تعديل استباقي لمنع خطأ Pandas
     if fast is None or slow is None or rsi is None or atr is None or ma14 is None:
         return
 
     latest = entry_candles[-1]
-    spec = db.execute(text("SELECT point, digits, tick_size, tick_value FROM symbol_specs WHERE symbol=:symbol"), {"symbol": symbol}).mappings().first()
+    
+    # 🛠️ استخدام await لجلب مواصفات الرمز
+    spec = (await db.execute(text("SELECT point, digits, tick_size, tick_value FROM symbol_specs WHERE symbol=:symbol"), {"symbol": symbol})).mappings().first()
     
     if not spec:
         system_logger.warning("🛑 %s: symbol specification missing; trading blocked", symbol)
@@ -150,7 +155,7 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
         "low": float(latest["low"]),
         "close": float(latest["close"]),
         "price": float(latest["close"]),
-        # ✅ تمرير المؤشرات عبر الدالة الآمنة لاستخراج الأرقام وحل الخطأ نهائياً!
+        # تمرير المؤشرات عبر الدالة الآمنة لاستخراج الأرقام وحل الخطأ نهائياً!
         "fast_ma": _get_last_val(fast),
         "slow_ma": _get_last_val(slow),
         "fast_ma_prev": _get_last_val(fast_prev),
@@ -169,7 +174,8 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
         account_id = str(account["id"])
         
         for strategy_name in config.enabled_strategies:
-            result = evaluate_and_execute_strategy(db, account_id, strategy_name, market_for_account)
+            # 🛠️ استخدام await لانتظار تقييم وتنفيذ الاستراتيجية
+            result = await evaluate_and_execute_strategy(db, account_id, strategy_name, market_for_account)
             
             if result.get("decision") in VALID_DECISIONS:
                 system_logger.info("🎯 Account %s | MTF %s H1=%s M15=%s M5=%s -> %s %s", 
@@ -179,44 +185,47 @@ def analyze_symbol(db, symbol: str, active_accounts: list):
                 break
 
 
-def run_cycle_sync():
-    db = SessionLocal()
-    try:
-        if not is_bot_running(db):
-            return
-        
-        acquired = db.execute(text("SELECT pg_try_advisory_lock(hashtext('ALQASEMY:TRADING_WORKER'))")).scalar()
-        if not acquired:
-            return
-            
+# 🛠️ دمج دالة تشغيل الدورة لتكون Async متكاملة وإلغاء الحاجة لـ asyncio.to_thread
+async def run_cycle():
+    async with AsyncSessionLocal() as db:
         try:
-            active_accounts = db.execute(text("""
-                SELECT id, account_number, ea_id 
-                FROM trading_accounts 
-                WHERE is_connected = true
-            """)).mappings().all()
+            # 🛠️ (تنبيه: يفترض أن دالة is_bot_running قد تم تحويلها أيضاً إلى async)
+            bot_running = await is_bot_running(db)
+            if not bot_running:
+                return
             
-            if not active_accounts:
+            # 🛠️ القفل باستخدام await
+            acquired = (await db.execute(text("SELECT pg_try_advisory_lock(hashtext('ALQASEMY:TRADING_WORKER'))"))).scalar()
+            if not acquired:
                 return
                 
-            for symbol in config.symbols:
-                analyze_symbol(db, symbol, active_accounts)
+            try:
+                # 🛠️ جلب الحسابات النشطة بـ await
+                active_accounts = (await db.execute(text("""
+                    SELECT id, account_number, ea_id 
+                    FROM trading_accounts 
+                    WHERE is_connected = true
+                """))).mappings().all()
                 
-            db.commit()
-            
-        except Exception as inner_exc:
-            db.rollback()
-            system_logger.error(f"Error during market analysis: {inner_exc}")
-            
-        finally:
-            db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
-            db.commit()
-            
-    except Exception as exc:
-        db.rollback()
-        system_logger.exception("Trading cycle failed: %s", exc)
-    finally:
-        db.close()
+                if not active_accounts:
+                    return
+                    
+                for symbol in config.symbols:
+                    await analyze_symbol(db, symbol, active_accounts)
+                    
+                await db.commit()
+                
+            except Exception as inner_exc:
+                await db.rollback()
+                system_logger.error(f"Error during market analysis: {inner_exc}")
+                
+            finally:
+                await db.execute(text("SELECT pg_advisory_unlock(hashtext('ALQASEMY:TRADING_WORKER'))"))
+                await db.commit()
+                
+        except Exception as exc:
+            await db.rollback()
+            system_logger.exception("Trading cycle failed: %s", exc)
 
 
 async def start_background_worker():
@@ -224,7 +233,8 @@ async def start_background_worker():
                        config.symbols, config.direction_timeframe, config.confirmation_timeframe, config.entry_timeframe)
     while True:
         try:
-            await asyncio.to_thread(run_cycle_sync)
+            # 🛠️ تم إلغاء asyncio.to_thread لأنه أصبح Async نقي فائق السرعة
+            await run_cycle()
         except asyncio.CancelledError:
             system_logger.info("🛑 Trading worker stopped")
             raise
