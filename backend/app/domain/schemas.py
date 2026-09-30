@@ -238,6 +238,7 @@ class SymbolSpecSync(BaseModel):
     
     contract_size: float = Field(default=100000.0, ge=0)
 
+
 # ============================================================
 # ACCOUNT HEARTBEAT / SYNC
 # ============================================================
@@ -375,6 +376,42 @@ class PendingOrdersSyncRequest(BaseModel):
     orders: list[PendingOrderItem] = Field(
         default_factory=list,
     )
+
+
+# ============================================================
+# TRADE HISTORY SYNC (الأرشيف وسجل الصفقات المغلقة)
+# ============================================================
+
+class HistoryDealItem(BaseModel):
+    """
+    صفقة مغلقة أو منفذة تاريخياً قادمة من دفاتر MT5.
+    """
+    deal_ticket: int
+    order_ticket: int
+    position_ticket: int
+    symbol: str
+    side: str
+    volume: float = Field(gt=0)
+    open_price: float
+    close_price: float
+    sl: Optional[float] = 0.0
+    tp: Optional[float] = 0.0
+    profit: float
+    commission: Optional[float] = 0.0
+    swap: Optional[float] = 0.0
+    comment: Optional[str] = ""
+    open_time: datetime
+    close_time: datetime
+
+
+class HistorySyncRequest(BaseModel):
+    """
+    طلب مزامنة دفعة من الصفقات المغلقة لأرشيف الحساب.
+    """
+    account_number: int = Field(gt=0)
+    ea_id: str = ""
+    magic: Optional[int] = None
+    deals: list[HistoryDealItem] = Field(default_factory=list)
 
 
 # ============================================================
