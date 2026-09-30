@@ -57,7 +57,6 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
         if bot_state_record and not bot_state_record["is_running"]:
             return
 
-        # 🚀 جلب الحساب الحقيقي النشط فقط دون أي قيم وهمية
         account = db.execute(
             text("""
                 SELECT id, account_number, balance, equity, currency 
@@ -84,7 +83,6 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
 
         account_id = str(account["id"])
 
-        # 🚀 التحقق من توفر الرصيد الحقيقي (حماية ضد الحسابات غير المتزامنة)
         real_balance = float(account["balance"] or 0.0)
         real_equity = float(account["equity"] or 0.0)
         if real_balance <= 0:
@@ -99,7 +97,6 @@ def run_strategy_in_background(symbol: str, timeframe: str, latest_candle: schem
         tick_size = float(spec["tick_size"]) if spec and spec.get("tick_size") else (0.01 if "XAU" in symbol else 0.00001)
         tick_value = float(spec["tick_value"]) if spec and spec.get("tick_value") else 1.0
 
-        # 🚀 حقن رأس المال الحقيقي بالكامل دون أي افتراضات وهمية
         market_data = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -276,7 +273,7 @@ def account_heartbeat(
         db.close()
 
 
-# ─── 3. Candles Sync (المعالجة في الخلفية لمنع التجميد والاختناق) ───────────────
+# ─── 3. Candles Sync ──────────────────────────────────────────────────────────
 
 def process_candles_background_task(req: schemas.CandlesSyncRequest, ea_id: str):
     db = SessionLocal()
@@ -333,10 +330,9 @@ def sync_candles(
         return {"status": "ignored", "count": 0}
 
     ea_id = req.ea_id or "MT5-ALQASEMY-01"
-    
     background_tasks.add_task(process_candles_background_task, req, ea_id)
-    
     return {"status": "success", "count": len(req.candles), "message": "processing in background chunks"}
+
 
 # ─── 4. Candles Status Check ──────────────────────────────────────────────────
 
@@ -379,6 +375,7 @@ def check_candles_status(
     finally:
         db.close()
 
+
 # ─── 5. Positions Sync ────────────────────────────────────────────────────────
 
 @router.post("/positions/sync")
@@ -412,7 +409,7 @@ def sync_positions(
         db.close()
 
 
-# ─── 6. Pending Orders Sync (معدل ليتطابق 100% مع أعمدة قاعدة البيانات الحقيقية) ───────────────────────────────
+# ─── 6. Pending Orders Sync ───────────────────────────────────────────────────
 
 @router.post("/pending-orders/sync")
 def sync_pending_orders(
@@ -422,9 +419,7 @@ def sync_pending_orders(
     _authorize(x_mt5_key)
     db = SessionLocal()
     try:
-        # تفريغ الجدول أو تحديثه بما يتناسب مع البيانات الواردة
         db.execute(text("TRUNCATE TABLE pending_orders"))
-        
         for o in req.orders:
             db.execute(text("""
                 INSERT INTO pending_orders (
@@ -444,7 +439,6 @@ def sync_pending_orders(
                 "tp": o.take_profit,
                 "updated_at": o.updated_at or text("NOW()"),
             })
-            
         db.commit()
         return {"status": "success", "count": len(req.orders)}
     except Exception as exc:
@@ -453,6 +447,7 @@ def sync_pending_orders(
         raise HTTPException(500, "Pending orders synchronization failed")
     finally:
         db.close()
+
 
 # ─── 7. Symbol Specs Sync ─────────────────────────────────────────────────────
 
@@ -609,7 +604,6 @@ def report_execution_single(
     dbSession = SessionLocal()
     try:
         ticket_val = report.mt5_ticket or report.mt5_order_ticket or report.mt5_deal_ticket
-        
         dbSession.execute(text("""
             UPDATE trade_commands
             SET status = :status,
@@ -670,3 +664,79 @@ def report_execution(
         raise HTTPException(500, "Report execution failed")
     finally:
         dbSession.close()
+
+
+# ─── 9. History Sync (أرشيف الصفقات المغلقة) ──────────────────────────────────
+
+@router.post("/history/sync")
+def sync_trade_history(
+    req: schemas.HistorySyncRequest,
+    x_mt5_key: Optional[str] = Header(default=None)
+):
+    _authorize(x_mt5_key)
+    if not req.deals:
+        return {"status": "success", "count": 0}
+
+    db = SessionLocal()
+    try:
+        inserted = 0
+        for d in req.deals:
+            cmd_id = ""
+            strat_name = ""
+            if d.comment and "AQ|" in d.comment:
+                cmd_id = d.comment.replace("AQ|", "").strip()
+                cmd = db.execute(
+                    text("SELECT strategy_name FROM trade_commands WHERE id::text LIKE :cid LIMIT 1"),
+                    {"cid": f"{cmd_id}%"}
+                ).mappings().first()
+                if cmd:
+                    strat_name = cmd["strategy_name"]
+
+            db.execute(text("""
+                INSERT INTO trade_history (
+                    deal_ticket, order_ticket, position_ticket, account_number,
+                    symbol, side, volume, open_price, close_price, sl, tp,
+                    profit, commission, swap, magic, comment, command_id,
+                    strategy_name, open_time, close_time, created_at
+                ) VALUES (
+                    :deal_ticket, :order_ticket, :position_ticket, :account,
+                    :symbol, :side, :volume, :open_price, :close_price, :sl, :tp,
+                    :profit, :commission, :swap, :magic, :comment, :cmd_id,
+                    :strat_name, :open_time, :close_time, NOW()
+                )
+                ON CONFLICT (deal_ticket) DO UPDATE SET
+                    profit = EXCLUDED.profit,
+                    close_price = EXCLUDED.close_price,
+                    close_time = EXCLUDED.close_time
+            """), {
+                "deal_ticket": d.deal_ticket,
+                "order_ticket": d.order_ticket,
+                "position_ticket": d.position_ticket,
+                "account": req.account_number,
+                "symbol": d.symbol,
+                "side": d.side,
+                "volume": d.volume,
+                "open_price": d.open_price,
+                "close_price": d.close_price,
+                "sl": d.sl,
+                "tp": d.tp,
+                "profit": d.profit,
+                "commission": d.commission,
+                "swap": d.swap,
+                "magic": req.magic,
+                "comment": d.comment,
+                "cmd_id": cmd_id,
+                "strat_name": strat_name,
+                "open_time": d.open_time,
+                "close_time": d.close_time,
+            })
+            inserted += 1
+
+        db.commit()
+        return {"status": "success", "count": inserted}
+    except Exception as exc:
+        db.rollback()
+        logger.exception("History sync failed: %s", exc)
+        raise HTTPException(500, "Trade history sync failed")
+    finally:
+        db.close()
