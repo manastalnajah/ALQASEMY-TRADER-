@@ -1,4 +1,3 @@
-rval_seconds))
 import asyncio
 import pandas as pd  
 from sqlalchemy import text
