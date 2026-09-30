@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ تم التحديث لدعم Async
 from sqlalchemy import text
 from app.strategies.strategy_manager import manager as strategy_manager
 from app.services import trade_service
@@ -113,7 +113,8 @@ def calculate_rsi(prices: list, period: int = 14) -> float:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: str, market_data: dict):
+# 🛠️ تحويل الدالة إلى async
+async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strategy_name: str, market_data: dict):
     symbol = str(market_data.get("symbol") or "").upper()
     timeframe = str(market_data.get("timeframe") or getattr(config, "timeframe", "M5")).upper()
     candle_key = str(market_data.get("candle_key") or market_data.get("open_time") or "")
@@ -138,13 +139,13 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
     # 🚀 تجهيز البيانات الشاملة (Historical Data + Dynamic S/R)
     # ==================================================
     try:
-        # جلب آخر 150 شمعة لتغذية الاستراتيجية الذهبية واستخراج الدعوم والمقاومات
-        rows = db.execute(text("""
+        # 🛠️ استخدام await وتحديث استعلام قاعدة البيانات ليصبح غير متزامن
+        rows = (await db.execute(text("""
             SELECT open_time, open, high, low, close, volume 
             FROM candles 
             WHERE symbol_name = :sym AND timeframe = :tf 
             ORDER BY open_time DESC LIMIT 150
-        """), {"sym": symbol, "tf": timeframe}).mappings().all()
+        """), {"sym": symbol, "tf": timeframe})).mappings().all()
 
         # تحويل البيانات إلى مصفوفة قواميس (مع قلب الترتيب ليكون الأقدم أولاً كما يتطلب Pandas)
         candles_list = [dict(r) for r in rows][::-1]
@@ -256,7 +257,8 @@ def evaluate_and_execute_strategy(db: Session, account_id: str, strategy_name: s
             ea_id=str(market_data.get("ea_id") or ""),
         )
 
-        created = trade_service.process_new_command(
+        # 🛠️ استخدام await لانتظار حفظ الأمر الجديد في قاعدة البيانات
+        created = await trade_service.process_new_command(
             db=db,
             command=command,
             account_id=account_id,
