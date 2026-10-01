@@ -51,10 +51,10 @@ class PerformanceService:
 
                 # 4. تحليل وحفظ الصفقات
                 for deal in request_data.deals:
-                    net_profit = deal.profit + deal.commission + deal.swap
+                    net_profit = float(deal.profit) + float(deal.commission) + float(deal.swap)
                     total_realized_pnl += net_profit
-                    total_commission += deal.commission
-                    total_swap += deal.swap
+                    total_commission += float(deal.commission)
+                    total_swap += float(deal.swap)
                     
                     if net_profit > 0:
                         trades_won += 1
@@ -82,7 +82,7 @@ class PerformanceService:
                             ) VALUES (
                                 :deal_ticket, :order_ticket, :position_ticket, :account_number, :symbol, :side,
                                 :volume, :open_price, :close_price, :sl, :tp, :profit, :commission, :swap, :magic,
-                                :comment, :open_time, :close_time, now()
+                                :comment, CAST(:open_time AS timestamp), CAST(:close_time AS timestamp), now()
                             )
                         """)
                         await db.execute(query_insert_deal, {
@@ -92,18 +92,18 @@ class PerformanceService:
                             "account_number": request_data.account_number,
                             "symbol": deal.symbol,
                             "side": deal.side,
-                            "volume": deal.volume,
-                            "open_price": deal.open_price,
-                            "close_price": deal.close_price,
-                            "sl": deal.sl,
-                            "tp": deal.tp,
-                            "profit": deal.profit,
-                            "commission": deal.commission,
-                            "swap": deal.swap,
+                            "volume": float(deal.volume),
+                            "open_price": float(deal.open_price),
+                            "close_price": float(deal.close_price),
+                            "sl": float(deal.sl),
+                            "tp": float(deal.tp),
+                            "profit": float(deal.profit),
+                            "commission": float(deal.commission),
+                            "swap": float(deal.swap),
                             "magic": request_data.magic,
-                            "comment": deal.comment,
-                            "open_time": deal.open_time,
-                            "close_time": deal.close_time
+                            "comment": deal.comment or "",
+                            "open_time": str(deal.open_time).replace("T", " "),
+                            "close_time": str(deal.close_time).replace("T", " ")
                         })
 
                 # 5. حساب الإحصائيات المعقدة
