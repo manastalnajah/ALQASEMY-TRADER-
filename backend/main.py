@@ -8,12 +8,13 @@ from database import initialize_database
 from app.api.v1.trades_router import router as trades_router
 from app.api.v1.bot_router import router as bot_router
 from app.api.v1.mt5_router import router as mt5_router
+# 👇 1. استدعاء ملف المسار الخاص بالهستوري
+from app.api.v1.history_router import router as history_router 
 from app.workers.trading_worker import start_background_worker
 from app.api.middleware.performance import PerformanceMiddleware
 
 logger = logging.getLogger("AlqasemyTrader")
 
-# 🛠️ تم نقل استدعاء initialize_database إلى داخل lifespan لأنه أصبح async
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. تهيئة قاعدة البيانات أولاً عند الإقلاع
@@ -80,6 +81,8 @@ app.add_middleware(
 app.include_router(trades_router)
 app.include_router(bot_router)
 app.include_router(mt5_router)
+# 👇 2. إضافة المسار الجديد لتطبيقك
+app.include_router(history_router) 
 
 
 @app.get("/")
