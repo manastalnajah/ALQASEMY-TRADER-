@@ -1,14 +1,16 @@
-from fastapi import APIRouter, HTTPException
-from app.schemas.history import HistorySyncRequest
+from fastapi import APIRouter, HTTPException, Request
+from app.domain.history import HistorySyncRequest
 from app.services.performance_service import PerformanceService
 
-router = APIRouter(prefix="/api/v1/mt5/history", tags=["History"])
+router = APIRouter(prefix="/api/v1/mt5/history", tags=["MT5 History"])
 
 @router.post("/sync")
-async def sync_history(request: HistorySyncRequest):
-    success = await PerformanceService.process_history_sync(request)
+async def sync_history(request_data: HistorySyncRequest, request: Request):
+    mt5_key = request.headers.get("X-MT5-Key")
+    
+    success = await PerformanceService.process_history_sync(request_data)
     
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to process history sync")
+        raise HTTPException(status_code=500, detail="Failed to calculate and sync performance")
         
-    return {"status": "success", "message": "History and performance synced successfully"}
+    return {"status": "success", "message": "History synced and performance updated"}
