@@ -1,5 +1,6 @@
 import logging
 from datetime import date
+import datetime as dt # 🌟 تم إضافة هذه المكتبة للتعامل الصحيح مع التواريخ
 from sqlalchemy import text
 from database import AsyncSessionLocal
 from app.domain.history import HistorySyncRequest
@@ -74,6 +75,7 @@ class PerformanceService:
                     deal_exists = await db.execute(query_check_deal, {"deal_ticket": deal.deal_ticket})
                     
                     if not deal_exists.fetchone():
+                        # 🌟 تمت إزالة الـ CAST لأننا سنرسل كائن Datetime صريح
                         query_insert_deal = text("""
                             INSERT INTO trade_history (
                                 deal_ticket, order_ticket, position_ticket, account_number, symbol, side,
@@ -82,9 +84,21 @@ class PerformanceService:
                             ) VALUES (
                                 :deal_ticket, :order_ticket, :position_ticket, :account_number, :symbol, :side,
                                 :volume, :open_price, :close_price, :sl, :tp, :profit, :commission, :swap, :magic,
-                                :comment, CAST(:open_time AS timestamp), CAST(:close_time AS timestamp), now()
+                                :comment, :open_time, :close_time, now()
                             )
                         """)
+                        
+                        # 🌟 تحويل التواريخ القادمة من الإكسبيرت (Timestamps) إلى كائنات Datetime آمنة لقاعدة البيانات
+                        open_dt = None
+                        close_dt = None
+                        try:
+                            if deal.open_time:
+                                open_dt = dt.datetime.fromtimestamp(int(deal.open_time))
+                            if deal.close_time:
+                                close_dt = dt.datetime.fromtimestamp(int(deal.close_time))
+                        except Exception as dt_error:
+                            logger.error(f"Error parsing date for deal {deal.deal_ticket}: {dt_error}")
+
                         await db.execute(query_insert_deal, {
                             "deal_ticket": deal.deal_ticket,
                             "order_ticket": deal.order_ticket,
@@ -102,8 +116,8 @@ class PerformanceService:
                             "swap": float(deal.swap),
                             "magic": request_data.magic,
                             "comment": deal.comment or "",
-                            "open_time": str(deal.open_time).replace("T", " "),
-                            "close_time": str(deal.close_time).replace("T", " ")
+                            "open_time": open_dt,
+                            "close_time": close_dt
                         })
 
                 # 5. حساب الإحصائيات المعقدة
