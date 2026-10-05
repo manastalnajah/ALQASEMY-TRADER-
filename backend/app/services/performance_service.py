@@ -1,6 +1,6 @@
 import logging
 from datetime import date
-import datetime as dt # 🌟 تم إضافة هذه المكتبة للتعامل الصحيح مع التواريخ
+import datetime as dt # 🌟 التعامل الصحيح مع التواريخ
 from sqlalchemy import text
 from database import AsyncSessionLocal
 from app.domain.history import HistorySyncRequest
@@ -20,7 +20,7 @@ class PerformanceService:
                     FROM trading_accounts 
                     WHERE account_number = :account_number
                 """)
-                # 🛠️ تم الإصلاح: إرسال المتغير كرقم صحيح (int) بدلاً من نص (str)
+                # 🛠️️ إرسال المتغير كرقم صحيح (int) لتفادي أخطاء PostgreSQL
                 result = await db.execute(query_account, {"account_number": int(request_data.account_number)})
                 account = result.fetchone()
                     
@@ -51,7 +51,9 @@ class PerformanceService:
                 largest_win = 0.0
                 largest_loss = 0.0
 
-                # 4. تحليل وحفظ الصفقات
+                deals_to_insert = [] # 🚀 قائمة لتجميع الصفقات للإدخال الجماعي (Bulk Insert)
+
+                # 4. تحليل وتجميع الصفقات
                 for deal in request_data.deals:
                     net_profit = float(deal.profit) + float(deal.commission) + float(deal.swap)
                     total_realized_pnl += net_profit
@@ -71,55 +73,54 @@ class PerformanceService:
                     else:
                         trades_breakeven += 1
 
-                    # حفظ الصفقة الفردية في جدول trade_history لتظهر في التطبيق
-                    query_check_deal = text("SELECT deal_ticket FROM trade_history WHERE deal_ticket = :deal_ticket")
-                    deal_exists = await db.execute(query_check_deal, {"deal_ticket": deal.deal_ticket})
-                    
-                    if not deal_exists.fetchone():
-                        # 🌟 تمت إزالة الـ CAST لأننا سنرسل كائن Datetime صريح
-                        query_insert_deal = text("""
-                            INSERT INTO trade_history (
-                                deal_ticket, order_ticket, position_ticket, account_number, symbol, side,
-                                volume, open_price, close_price, sl, tp, profit, commission, swap, magic,
-                                comment, open_time, close_time, created_at
-                            ) VALUES (
-                                :deal_ticket, :order_ticket, :position_ticket, :account_number, :symbol, :side,
-                                :volume, :open_price, :close_price, :sl, :tp, :profit, :commission, :swap, :magic,
-                                :comment, :open_time, :close_time, now()
-                            )
-                        """)
-                        
-                        # 🌟 تحويل التواريخ القادمة من الإكسبيرت (Timestamps) إلى كائنات Datetime آمنة لقاعدة البيانات
-                        open_dt = None
-                        close_dt = None
-                        try:
-                            if deal.open_time:
-                                open_dt = dt.datetime.fromtimestamp(int(deal.open_time))
-                            if deal.close_time:
-                                close_dt = dt.datetime.fromtimestamp(int(deal.close_time))
-                        except Exception as dt_error:
-                            logger.error(f"Error parsing date for deal {deal.deal_ticket}: {dt_error}")
+                    # تحضير التواريخ
+                    open_dt = None
+                    close_dt = None
+                    try:
+                        if deal.open_time:
+                            open_dt = dt.datetime.fromtimestamp(int(deal.open_time))
+                        if deal.close_time:
+                            close_dt = dt.datetime.fromtimestamp(int(deal.close_time))
+                    except Exception as dt_error:
+                        logger.error(f"Error parsing date for deal {deal.deal_ticket}: {dt_error}")
 
-                        await db.execute(query_insert_deal, {
-                            "deal_ticket": deal.deal_ticket,
-                            "order_ticket": deal.order_ticket,
-                            "position_ticket": deal.position_ticket,
-                            "account_number": int(request_data.account_number), # 🛠️ تأكيد التحويل هنا أيضاً
-                            "symbol": deal.symbol,
-                            "side": deal.side,
-                            "volume": float(deal.volume),
-                            "open_price": float(deal.open_price),
-                            "close_price": float(deal.close_price),
-                            "sl": float(deal.sl),
-                            "tp": float(deal.tp),
-                            "profit": float(deal.profit),
-                            "commission": float(deal.commission),
-                            "swap": float(deal.swap),
-                            "magic": request_data.magic,
-                            "comment": deal.comment or "",
-                            "open_time": open_dt,
-                            "close_time": close_dt
-                        })
+                    # إضافة الصفقة إلى القائمة (استعداداً للإدخال الجماعي)
+                    deals_to_insert.append({
+                        "deal_ticket": deal.deal_ticket,
+                        "order_ticket": deal.order_ticket,
+                        "position_ticket": deal.position_ticket,
+                        "account_number": int(request_data.account_number),
+                        "symbol": deal.symbol,
+                        "side": deal.side,
+                        "volume": float(deal.volume),
+                        "open_price": float(deal.open_price),
+                        "close_price": float(deal.close_price),
+                        "sl": float(deal.sl),
+                        "tp": float(deal.tp),
+                        "profit": float(deal.profit),
+                        "commission": float(deal.commission),
+                        "swap": float(deal.swap),
+                        "magic": request_data.magic,
+                        "comment": deal.comment or "",
+                        "open_time": open_dt,
+                        "close_time": close_dt
+                    })
+
+                # 🚀 إدخال الصفقات كدفعة واحدة (Bulk Insert) لتفادي الـ Timeout
+                if deals_to_insert:
+                    query_bulk_insert = text("""
+                        INSERT INTO trade_history (
+                            deal_ticket, order_ticket, position_ticket, account_number, symbol, side,
+                            volume, open_price, close_price, sl, tp, profit, commission, swap, magic,
+                            comment, open_time, close_time, created_at
+                        ) VALUES (
+                            :deal_ticket, :order_ticket, :position_ticket, :account_number, :symbol, :side,
+                            :volume, :open_price, :close_price, :sl, :tp, :profit, :commission, :swap, :magic,
+                            :comment, :open_time, :close_time, now()
+                        )
+                        ON CONFLICT (deal_ticket) DO NOTHING
+                    """)
+                    await db.execute(query_bulk_insert, deals_to_insert)
 
                 # 5. حساب الإحصائيات المعقدة
                 win_rate = (trades_won / trades_closed) * 100 if trades_closed > 0 else 0.0
