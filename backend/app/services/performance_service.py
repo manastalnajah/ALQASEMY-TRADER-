@@ -20,7 +20,8 @@ class PerformanceService:
                     FROM trading_accounts 
                     WHERE account_number = :account_number
                 """)
-                result = await db.execute(query_account, {"account_number": str(request_data.account_number)})
+                # 🛠️ تم الإصلاح: إرسال المتغير كرقم صحيح (int) بدلاً من نص (str)
+                result = await db.execute(query_account, {"account_number": int(request_data.account_number)})
                 account = result.fetchone()
                     
                 if not account:
@@ -103,7 +104,7 @@ class PerformanceService:
                             "deal_ticket": deal.deal_ticket,
                             "order_ticket": deal.order_ticket,
                             "position_ticket": deal.position_ticket,
-                            "account_number": request_data.account_number,
+                            "account_number": int(request_data.account_number), # 🛠️ تأكيد التحويل هنا أيضاً
                             "symbol": deal.symbol,
                             "side": deal.side,
                             "volume": float(deal.volume),
