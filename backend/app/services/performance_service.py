@@ -20,7 +20,6 @@ class PerformanceService:
                     FROM trading_accounts 
                     WHERE account_number = :account_number
                 """)
-                # 🛠️️ إرسال المتغير كرقم صحيح (int) لتفادي أخطاء PostgreSQL
                 result = await db.execute(query_account, {"account_number": int(request_data.account_number)})
                 account = result.fetchone()
                     
@@ -32,8 +31,9 @@ class PerformanceService:
                 current_balance = float(account[1] or 0.0)
                 current_equity = float(account[2] or 0.0)
                 
-                # 2. تحديد تاريخ اليوم
-                today = date.today().isoformat()
+                # 2. تحديد تاريخ اليوم ككائن Date صريح بدلاً من نص
+                # 🛠️ التعديل هنا: إزالة .isoformat()
+                today = date.today() 
                 
                 trades_closed = len(request_data.deals)
                 if trades_closed == 0:
@@ -84,7 +84,7 @@ class PerformanceService:
                     except Exception as dt_error:
                         logger.error(f"Error parsing date for deal {deal.deal_ticket}: {dt_error}")
 
-                    # إضافة الصفقة إلى القائمة (استعداداً للإدخال الجماعي)
+                    # إضافة الصفقة إلى القائمة
                     deals_to_insert.append({
                         "deal_ticket": deal.deal_ticket,
                         "order_ticket": deal.order_ticket,
@@ -106,7 +106,7 @@ class PerformanceService:
                         "close_time": close_dt
                     })
 
-                # 🚀 إدخال الصفقات كدفعة واحدة (Bulk Insert) لتفادي الـ Timeout
+                # 🚀 إدخال الصفقات كدفعة واحدة (Bulk Insert)
                 if deals_to_insert:
                     query_bulk_insert = text("""
                         INSERT INTO trade_history (
