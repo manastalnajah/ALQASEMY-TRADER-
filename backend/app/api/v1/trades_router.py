@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Header, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ تم التحديث لدعم AsyncSession
 from database import get_db
 from app.domain import schemas
 from app.repositories.trade_repo import TradeRepository
@@ -18,48 +18,67 @@ def _authorize_control(x_control_key: str | None):
 
 
 @router.post("/commands", response_model=schemas.CommandResponse)
-def create_command(
+async def create_command(  # 🛠️ تحويل لـ Async
     command: schemas.CommandCreate, 
     account_id: str = Query(..., description="المعرف الفريد للحساب المراد تنفيذ الأمر عليه"),
-    db: Session = Depends(get_db), 
+    db: AsyncSession = Depends(get_db),  # 🛠️ استخدام AsyncSession
     x_control_key: str | None = Header(default=None)
 ):
     _authorize_control(x_control_key)
-    # تمرير account_id الإلزامي لربط الأمر بالحساب الصحيح وإدارة المخاطر
-    return trade_service.process_new_command(db=db, command=command, account_id=account_id, enforce_risk=True)
+    
+    # 💡 يتم سحب account_number تلقائياً من داخل المتغير 'command' المرسل من فلاتر
+    # 🛠️ إضافة await لأن الدالة أصبحت غير متزامنة
+    return await trade_service.process_new_command(db=db, command=command, account_id=account_id, enforce_risk=True)
 
 
 @router.get("/commands/pending", response_model=list[schemas.CommandResponse])
-def get_pending_commands(
-    db: Session = Depends(get_db), 
+async def get_pending_commands(  # 🛠️ تحويل لـ Async
+    db: AsyncSession = Depends(get_db),  # 🛠️ استخدام AsyncSession
     x_control_key: str | None = Header(default=None)
 ):
     _authorize_control(x_control_key) # تأمين المسار
-    return TradeRepository(db).get_pending_commands()
+    repo = TradeRepository(db)
+    
+    # التحقق مما إذا كانت الدالة في الـ Repo متزامنة أم لا
+    if hasattr(repo.get_pending_commands, '__await__'):
+        return await repo.get_pending_commands()
+    return repo.get_pending_commands()
 
 
 @router.put("/commands/{command_id}/claim", response_model=schemas.CommandResponse)
-def claim_command(
+async def claim_command(  # 🛠️ تحويل لـ Async
     command_id: str, 
-    db: Session = Depends(get_db), 
+    db: AsyncSession = Depends(get_db),  # 🛠️ استخدام AsyncSession
     x_control_key: str | None = Header(default=None)
 ):
     _authorize_control(x_control_key) # تأمين المسار
-    command = TradeRepository(db).claim_command(command_id)
+    repo = TradeRepository(db)
+    
+    if hasattr(repo.claim_command, '__await__'):
+        command = await repo.claim_command(command_id)
+    else:
+        command = repo.claim_command(command_id)
+        
     if not command:
         raise HTTPException(409, "Command is already claimed or does not exist")
     return command
 
 
 @router.put("/commands/{command_id}/status", response_model=schemas.CommandResponse)
-def update_command_status(
+async def update_command_status(  # 🛠️ تحويل لـ Async
     command_id: str, 
     status: str = Body(..., embed=True), 
-    db: Session = Depends(get_db), 
+    db: AsyncSession = Depends(get_db),  # 🛠️ استخدام AsyncSession
     x_control_key: str | None = Header(default=None)
 ):
     _authorize_control(x_control_key) # تأمين المسار
-    command = TradeRepository(db).update_command_status(command_id, status)
+    repo = TradeRepository(db)
+    
+    if hasattr(repo.update_command_status, '__await__'):
+        command = await repo.update_command_status(command_id, status)
+    else:
+        command = repo.update_command_status(command_id, status)
+        
     if not command:
         raise HTTPException(404, "Command not found or invalid status")
     return command
