@@ -20,7 +20,7 @@ from database import Base
 
 
 # ============================================================
-# TRADING ACCOUNTS (تم إضافته هنا في القمة لكي يراه TradeCommand وباقي الجداول)
+# TRADING ACCOUNTS 
 # ============================================================
 
 class TradingAccount(Base):
@@ -82,6 +82,13 @@ class TradeCommand(Base):
     account_id = Column(
         UUID(as_uuid=True),
         ForeignKey("trading_accounts.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # ✅ تمت إضافة حقل account_number
+    account_number = Column(
+        BigInteger,
         nullable=True,
         index=True,
     )
@@ -477,14 +484,16 @@ class PositionSnapshot(Base):
 
 
 # ============================================================
-# LIVE POSITIONS
+# OPEN POSITIONS (كان اسمه LivePosition وتم تحديثه ليطابق SQL)
 # ============================================================
 
-class LivePosition(Base):
-    __tablename__ = "live_positions"
+class OpenPosition(Base):
+    # ✅ تم تغيير اسم الجدول ليطابق قاعدة البيانات بدقة
+    __tablename__ = "open_positions"
 
+    # ✅ تم تغيير نوع البيانات ليكون BigInteger ليطابق الـ SQL
     ticket = Column(
-        String,
+        BigInteger,
         primary_key=True,
     )
 
@@ -495,47 +504,61 @@ class LivePosition(Base):
     )
 
     symbol = Column(
-        String,
+        String(64),
         nullable=False,
         index=True,
     )
 
-    side = Column(
-        String,
+    # ✅ تم تغيير اسم العمود من side إلى position_type ليطابق الـ SQL
+    position_type = Column(
+        String(32),
         nullable=False,
     )
 
     volume = Column(
-        Float,
+        Numeric,
         nullable=False,
     )
 
-    price_open = Column(
-        Float,
+    open_price = Column(
+        Numeric,
         nullable=False,
     )
 
-    stop_loss = Column(
-        Float,
+    # ✅ إضافة حقل السعر الحالي
+    current_price = Column(
+        Numeric,
         nullable=False,
         default=0.0,
     )
 
-    take_profit = Column(
-        Float,
-        nullable=False,
+    sl = Column(
+        Numeric,
+        nullable=True,
+        default=0.0,
+    )
+
+    tp = Column(
+        Numeric,
+        nullable=True,
         default=0.0,
     )
 
     profit = Column(
-        Float,
+        Numeric,
         nullable=False,
         default=0.0,
     )
 
-    updated_at = Column(
+    # ✅ إضافة حقل وقت الفتح
+    open_time = Column(
         DateTime(timezone=True),
         nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
         server_default=text("NOW()"),
     )
 
@@ -547,8 +570,9 @@ class LivePosition(Base):
 class PendingOrder(Base):
     __tablename__ = "pending_orders"
 
+    # ✅ تم تغيير نوع البيانات ليكون BigInteger
     ticket = Column(
-        String,
+        BigInteger,
         primary_key=True,
     )
 
