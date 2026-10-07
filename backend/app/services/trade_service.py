@@ -24,6 +24,18 @@ async def process_new_command(
     command.order_type = command.order_type.upper()
     command.account_id = account_id  # ربط الأمر بالحساب لتجنب فشل الـ Migration
 
+    # =========================================================================
+    # ✅ شبكة الأمان: ضمان وجود account_number للصفقات اليدوية القادمة من التطبيق
+    # =========================================================================
+    if not command.account_number:
+        query_acc = text("SELECT account_number FROM trading_accounts WHERE id = CAST(:acc_id AS UUID)")
+        result = await db.execute(query_acc, {"acc_id": account_id})
+        row = result.fetchone()
+        if row:
+            command.account_number = row[0]
+        else:
+            system_logger.warning(f"⚠️ Warning: Could not auto-resolve account_number for account_id: {account_id}")
+
     if command.order_type not in VALID_TYPES:
         raise HTTPException(400, "نوع الأمر غير مسموح")
     if command.entry_price <= 0 or command.stop_loss <= 0 or command.take_profit <= 0:
@@ -38,7 +50,7 @@ async def process_new_command(
 
     # Manual/API commands are also protected. The strategy is never allowed to bypass this gate.
     if enforce_risk:
-        # 🛠️ استخدام await لانتظار محرك المخاطر (يفترض أن دالة validate_and_size تم/سيتم تحويلها لـ async)
+        # 🛠️ استخدام await لانتظار محرك المخاطر
         sized, reason = await validate_and_size(
             db,
             account_id=account_id,  # تمرير الحساب ليتم الخصم/التحقق من risk_state الخاص به
@@ -63,11 +75,11 @@ async def process_new_command(
         # 🛠️ استخدام await لحفظ الأمر في قاعدة البيانات بشكل غير متزامن
         command_obj = await repo.create_trade_command(command)
         
-        system_logger.info("✅ Command created: %s %s %.4f for account %s", 
-                           command.symbol, command.order_type, command.lot_size, account_id)
+        system_logger.info("✅ Command created: %s %s %.4f for account %s (Acc Num: %s)", 
+                           command.symbol, command.order_type, command.lot_size, account_id, command.account_number)
         return command_obj
     except Exception as e:
         # 🛠️ الرول باك غير المتزامن
         await db.rollback()
         system_logger.error("❌ Failed to save command: %s", str(e))
-        raise
+        raise HTTPException(500, "Failed to save command to database")
