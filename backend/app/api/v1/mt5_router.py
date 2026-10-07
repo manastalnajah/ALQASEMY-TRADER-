@@ -390,11 +390,19 @@ async def sync_positions(
     try:
         await db.execute(text("TRUNCATE TABLE open_positions"))
         for pos in req.positions:
+            # ✅ التعديل هنا: تمت إضافة account_number ليطابق قاعدة البيانات بدقة
             await db.execute(text("""
-                INSERT INTO open_positions (ticket, symbol, position_type, volume, open_price, current_price, sl, tp, profit, open_time, updated_at)
-                VALUES (:ticket, :sym, :type, :vol, :open_p, :curr_p, :sl, :tp, :profit, :open_time, NOW())
+                INSERT INTO open_positions (
+                    ticket, account_number, symbol, position_type, volume, 
+                    open_price, current_price, sl, tp, profit, open_time, updated_at
+                )
+                VALUES (
+                    :ticket, :account_number, :sym, :type, :vol, 
+                    :open_p, :curr_p, :sl, :tp, :profit, :open_time, NOW()
+                )
             """), {
                 "ticket": pos.ticket,
+                "account_number": req.account_number,
                 "sym": pos.symbol,
                 "type": pos.side,
                 "vol": pos.volume,
@@ -409,10 +417,11 @@ async def sync_positions(
         return {"status": "success", "count": len(req.positions)}
     except Exception as exc:
         await db.rollback()
+        logger.exception("Sync Positions Failed: %s", exc)
         raise HTTPException(500, "Sync Positions Failed")
 
 
-# ─── 6. Pending Orders Sync (معدل ليتطابق 100% مع أعمدة قاعدة البيانات الحقيقية) ───────────────────────────────
+# ─── 6. Pending Orders Sync ───────────────────────────────────────────────────
 
 @router.post("/pending-orders/sync")
 async def sync_pending_orders(
