@@ -537,8 +537,9 @@ async def get_pending_commands(
 ):
     _authorize(x_mt5_key)
     try:
+        # ✅ 1. أضفنا account_number لجملة SELECT
         rows = (await db.execute(text("""
-            SELECT id, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id, strategy_name, signal_key, created_at
+            SELECT id, account_number, symbol, order_type, lot_size, entry_price, stop_loss, take_profit, ea_id, strategy_name, signal_key, created_at
             FROM trade_commands
             WHERE status = 'pending'
               AND (CAST(:ea_id AS TEXT) IS NULL OR ea_id = '' OR ea_id = CAST(:ea_id AS TEXT))
@@ -551,6 +552,10 @@ async def get_pending_commands(
             commands.append({
                 "id": str(r["id"]),
                 "command_id": str(r["id"]),
+                
+                # ✅ 2. تمرير account_number للإكسبيرت
+                "account_number": r["account_number"] if r["account_number"] else 0, 
+                
                 "symbol": r["symbol"],
                 "order_type": r["order_type"],
                 "side": r["order_type"],
@@ -569,7 +574,6 @@ async def get_pending_commands(
         return commands
     except Exception as exc:
         raise HTTPException(500, "Failed to get commands")
-
 
 @router.post("/commands/{command_id}/ack")
 async def acknowledge_command(
