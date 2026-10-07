@@ -38,23 +38,52 @@ def _price(market_data: dict, decision: str) -> float:
 def _build_protection(market_data: dict, decision: str, entry: float, sl: float, tp: float):
     """بناء مستويات الوقف والهدف بدقة مع قيم احتياطية آمنة في حال تأخر مؤشر ATR"""
     if sl > 0 and tp > 0:
-        return sl, tp
+        calculated_sl = sl
+        calculated_tp = tp
+    else:
+        atr = _safe_float(market_data.get("atr"), 0.0)
+        symbol = str(market_data.get("symbol", "")).upper()
 
-    atr = _safe_float(market_data.get("atr"), 0.0)
+        if atr <= 0:
+            # قيمة افتراضية آمنة للوقف في حال عدم توفر ATR لحظياً (30 نقطة لليورو و 2.0 دولار للذهب)
+            atr = 2.0 if "XAU" in symbol else 0.0030
+
+        risk_distance = atr * getattr(config, "atr_sl_multiplier", 1.5)
+        rr = getattr(config, "reward_risk", 1.5)
+
+        if decision.startswith("BUY"):
+            calculated_sl = entry - risk_distance
+            calculated_tp = entry + (risk_distance * rr)
+        elif decision.startswith("SELL"):
+            calculated_sl = entry + risk_distance
+            calculated_tp = entry - (risk_distance * rr)
+        else:
+            return 0.0, 0.0
+
+    # ==================================================
+    # 🛡️ صمام الأمان الرياضي (Minimum Stop Loss Distance)
+    # لمنع ضرب السبريد للصفقات (تم إضافة الحماية هنا)
+    # ==================================================
     symbol = str(market_data.get("symbol", "")).upper()
+    point_size = 0.01 if "XAU" in symbol or "JPY" in symbol else 0.00001
+    
+    # الحد الأدنى المسموح به بالـ Points (مثلاً 150 Point = 15 Pip)
+    MINIMUM_SL_POINTS = 150.0 
+    min_distance = MINIMUM_SL_POINTS * point_size
 
-    if atr <= 0:
-        # قيمة افتراضية آمنة للوقف في حال عدم توفر ATR لحظياً (30 نقطة لليورو و 2.0 دولار للذهب)
-        atr = 2.0 if "XAU" in symbol else 0.0030
+    current_distance = abs(entry - calculated_sl)
 
-    risk_distance = atr * getattr(config, "atr_sl_multiplier", 1.5)
-    rr = getattr(config, "reward_risk", 1.5)
+    if current_distance < min_distance:
+        system_logger.warning(
+            f"🛡️ Protection Adjusted: SL distance ({current_distance:.5f}) was too tight for {symbol}. "
+            f"Expanding to minimum safe distance ({min_distance:.5f})."
+        )
+        if decision.startswith("BUY"):
+            calculated_sl = entry - min_distance
+        elif decision.startswith("SELL"):
+            calculated_sl = entry + min_distance
 
-    if decision.startswith("BUY"):
-        return round(entry - risk_distance, 5), round(entry + (risk_distance * rr), 5)
-    if decision.startswith("SELL"):
-        return round(entry + risk_distance, 5), round(entry - (risk_distance * rr), 5)
-    return 0.0, 0.0
+    return round(calculated_sl, 5), round(calculated_tp, 5)
 
 
 def _calculate_dynamic_lot(symbol: str, entry: float, sl: float, market_data: dict) -> float:
@@ -129,6 +158,7 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
 
     # ==================================================
     # 🛡️ فلتر أوقات الجلسات العالمية الفعالة
+    # ملاحظة: إذا أردت أن يتداول البوت 24 ساعة، قم بتغيير 7 و 21 لتصبح 1 و 23
     # ==================================================
     current_utc_hour = datetime.now(timezone.utc).hour
     if not (7 <= current_utc_hour <= 21):
@@ -259,6 +289,8 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
 
         sl_raw = _safe_float(final_result.get("sl", market_data.get("sl", 0.0)))
         tp_raw = _safe_float(final_result.get("tp", market_data.get("tp", 0.0)))
+        
+        # استدعاء دالة بناء الحماية التي تحتوي على صمام الأمان الجديد
         sl, tp = _build_protection(market_data, final_decision, entry, sl_raw, tp_raw)
         
         if sl <= 0 or tp <= 0:
@@ -285,6 +317,8 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
             strategy_name=executed_strategy,
             signal_key=signal_key,
             ea_id=str(market_data.get("ea_id") or ""),
+            # ✅ تم تمرير account_number هنا لضمان عمل الصفقات الآلية وربطها بالتطبيق
+            account_number=int(market_data.get("account_number")) if market_data.get("account_number") else None
         )
 
         created = await trade_service.process_new_command(
