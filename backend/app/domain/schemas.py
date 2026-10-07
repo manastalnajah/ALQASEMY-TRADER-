@@ -19,6 +19,9 @@ class CommandCreate(BaseModel):
     """
 
     account_id: Optional[UUID] = None
+    
+    # ✅ إضافة حقل account_number لمطابقة قاعدة البيانات (Supabase) والتطبيق
+    account_number: Optional[int] = Field(default=None)
 
     symbol: str = Field(
         min_length=1,
@@ -74,6 +77,9 @@ class CommandResponse(BaseModel):
     id: UUID
 
     account_id: Optional[UUID] = None
+    
+    # ✅ إضافة حقل account_number في الاستجابة
+    account_number: Optional[int] = None
 
     ea_id: str = ""
 
