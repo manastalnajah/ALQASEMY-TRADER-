@@ -196,3 +196,90 @@ class PerformanceService:
         except Exception as e:
             logger.error(f"❌ Error processing history sync: {str(e)}")
             return False
+
+    # =========================================================================
+    # 🚀 الإضافة الجديدة: دالة جلب بيانات الأداء ومنحنى الرصيد لتطبيق فلاتر
+    # =========================================================================
+    @staticmethod
+    async def get_performance_data(account_id: str) -> dict:
+        try:
+            async with AsyncSessionLocal() as db:
+                # 1. تجميع الإحصائيات العامة (Stats) بدقة حسابية عالية
+                stats_query = text("""
+                    SELECT 
+                        COALESCE(SUM(realized_pnl), 0) as total_profit,
+                        COALESCE(SUM(trades_closed), 0) as total_trades,
+                        COALESCE(SUM(trades_won), 0) as winning_trades,
+                        COALESCE(SUM(trades_lost), 0) as losing_trades,
+                        COALESCE(SUM(average_win * trades_won), 0) as gross_profit,
+                        COALESCE(SUM(average_loss * trades_lost), 0) as gross_loss,
+                        MAX(largest_win) as largest_win,
+                        MIN(largest_loss) as largest_loss
+                    FROM performance_daily 
+                    WHERE account_id = CAST(:acc_id AS UUID)
+                """)
+                stats_result = (await db.execute(stats_query, {"acc_id": account_id})).mappings().first()
+
+                stats = {}
+                if stats_result and stats_result["total_trades"] > 0:
+                    t_won = int(stats_result["winning_trades"])
+                    t_closed = int(stats_result["total_trades"])
+                    win_rate = (t_won / t_closed) * 100 if t_closed > 0 else 0.0
+                    
+                    gross_loss = float(stats_result["gross_loss"])
+                    gross_profit = float(stats_result["gross_profit"])
+                    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
+                    stats = {
+                        "totalProfit": float(stats_result["total_profit"]),
+                        "totalTrades": t_closed,
+                        "winningTrades": t_won,
+                        "losingTrades": int(stats_result["losing_trades"]),
+                        "winRate": round(win_rate, 2),
+                        "profitFactor": round(profit_factor, 2),
+                        "largestWin": float(stats_result["largest_win"] or 0.0),
+                        "largestLoss": float(stats_result["largest_loss"] or 0.0)
+                    }
+
+                # 2. جلب بيانات المنحنى البياني (Equity Curve)
+                curve_query = text("""
+                    SELECT date, ending_equity as equity 
+                    FROM performance_daily 
+                    WHERE account_id = CAST(:acc_id AS UUID)
+                    ORDER BY date ASC
+                """)
+                curve_result = (await db.execute(curve_query, {"acc_id": account_id})).mappings().all()
+
+                equity_curve = [
+                    {
+                        "date": str(row["date"]),
+                        "equity": float(row["equity"] or 0.0)
+                    }
+                    for row in curve_result
+                ]
+
+                # 3. جلب الأداء الشهري (Monthly Performance) للمخطط الشريطي
+                monthly_query = text("""
+                    SELECT TO_CHAR(date, 'Mon YYYY') as month, 
+                           SUM(realized_pnl) as profit 
+                    FROM performance_daily 
+                    WHERE account_id = CAST(:acc_id AS UUID)
+                    GROUP BY TO_CHAR(date, 'Mon YYYY'), EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
+                    ORDER BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
+                """)
+                monthly_result = (await db.execute(monthly_query, {"acc_id": account_id})).mappings().all()
+                
+                monthly_performance = [
+                    {"month": row["month"], "profit": float(row["profit"] or 0.0)}
+                    for row in monthly_result
+                ]
+
+                return {
+                    "status": "success",
+                    "stats": stats,
+                    "equityCurve": equity_curve,
+                    "monthlyPerformance": monthly_performance
+                }
+        except Exception as e:
+            logger.error(f"Error fetching performance data for account {account_id}: {str(e)}")
+            return {"status": "error", "message": str(e)}
