@@ -252,7 +252,7 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
         z_score = quant_report.get("z_score", 0.0)
 
         # استراتيجيات الارتداد التي تعاني من الترند القوي
-        is_reversion_strategy = executed_strategy in ["rsi_reversion", "smart_limits", "golden_setup"]
+        is_reversion_strategy = executed_strategy in ["rsi_reversion", "smart_limits"]
 
         # 1. منع التداول عكس الاتجاه القوي (الفلتر العام لجميع الأزواج)
         if is_reversion_strategy and regime == "TRENDING":
