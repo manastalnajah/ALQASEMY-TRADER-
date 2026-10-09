@@ -46,6 +46,7 @@ async def run_position_management_once():
                 WHERE is_active = true
                   AND is_trade_allowed = true
                   AND is_connected = true
+                  AND last_heartbeat > NOW() - INTERVAL '60 seconds'
             """))).mappings().all()
 
             if not accounts:
