@@ -318,7 +318,7 @@ class PositionRiskAnalyzer:
         # نقصّ عند 0 إذا تحرك السعر عكس الصفقة
         return max(0.0, min(1.0, progress))
 
-        async def _fetch_candles(
+    async def _fetch_candles(
         self,
         symbol: str,
         timeframe: str,
