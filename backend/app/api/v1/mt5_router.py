@@ -1,12 +1,13 @@
 # ============================================================
 # app/api/mt5_router.py
-# النسخة المعدلة — V2
+# النسخة النهائية — V2.1
 # ------------------------------------------------------------
 # تدعم:
-# - مزامنة آمنة للحسابات المتعددة
-# - smart position management (polling/ack/report)
-# - إصلاح curr_p
-# - منع ACK وهمي
+# - مزامنة آمنة للحسابات المتعددة (بدون TRUNCATE)
+# - Smart Position Management (polling/ack/report)
+# - حفظ current_price الحقيقي من EA
+# - منع ACK وهمي عبر RETURNING id
+# - إصلاح حذف الصفقات بـ != ALL(:tickets)
 # ============================================================
 
 import logging
@@ -82,8 +83,8 @@ def _authorize(x_mt5_key: Optional[str]):
     """
     التحقق من مفتاح MT5.
 
-    ⚠️ ملاحظة أمنية: تم إزالة المفتاح الثابت الذي كان مُضمّنًا في الكود.
-    يجب أن يكون المفتاح في config فقط (بيئة الإنتاج).
+    ⚠️ ملاحظة أمنية: لا يوجد مفتاح ثابت مُضمَّن في الكود.
+    المفتاح يجب أن يكون في config (بيئة الإنتاج).
     """
     if config.require_control_api_key:
         valid_keys = [
@@ -111,8 +112,8 @@ async def run_strategy_in_background(
     """
     تشغيل الاستراتيجية في الخلفية بعد مزامنة الشموع.
 
-    ⚠️ ملاحظة: تم إزالة fallback "أحدث حساب نشط" لأنه قد يختار
-    حسابًا غير مرتبط بالـ EA. الآن نعتمد على ea_id فقط.
+    ⚠️ لا يوجد fallback "أحدث حساب نشط" لأنه قد يختار
+    حسابًا غير مرتبط بالـ EA. نعتمد على ea_id فقط.
     """
     async with AsyncSessionLocal() as db:
         try:
@@ -499,7 +500,7 @@ async def check_candles_status(
 
 
 # =====================================================================
-# 5. Positions Sync — مُصلح بالكامل
+# 5. Positions Sync — النسخة النهائية
 # =====================================================================
 
 @router.post("/positions/sync")
@@ -512,11 +513,11 @@ async def sync_positions(
     مزامنة الصفقات المفتوحة.
 
     ✅ إصلاحات:
-    - إزالة TRUNCATE (خطر على الحسابات المتعددة).
+    - إزالة TRUNCATE.
     - حفظ current_price الحقيقي من EA.
     - حفظ identifier, magic, open_time.
-    - حذف الصفقات المغلقة لنفس الحساب فقط.
-    - تنفيذ العملية داخل معاملة واحدة.
+    - حذف الصفقات المغلقة لنفس الحساب فقط عبر != ALL(:tickets).
+    - تنظيف حالات الإدارة للصفقات المغلقة.
     """
     _authorize(x_mt5_key)
 
@@ -525,96 +526,83 @@ async def sync_positions(
         raise HTTPException(400, "account_number مطلوب")
 
     try:
-        async with db.begin():
-            # 1. UPSERT لكل صفقة
-            for pos in req.positions:
-                # current_price الحقيقي من EA (0 إذا لم يُرسل)
-                current_p = float(pos.current_price or 0.0)
-                if current_p <= 0:
-                    current_p = float(pos.price_open or 0.0)
-
-                open_time = pos.open_time or pos.updated_at or None
-
-                await db.execute(text("""
-                    INSERT INTO open_positions (
-                        ticket, account_number, identifier, magic,
-                        symbol, position_type, volume,
-                        open_price, current_price, sl, tp, profit,
-                        open_time, updated_at
-                    )
-                    VALUES (
-                        :ticket, :account_number, :identifier, :magic,
-                        :sym, :type, :vol,
-                        :open_p, :curr_p, :sl, :tp, :profit,
-                        :open_time, NOW()
-                    )
-                    ON CONFLICT (ticket) DO UPDATE SET
-                        account_number = EXCLUDED.account_number,
-                        identifier = EXCLUDED.identifier,
-                        magic = EXCLUDED.magic,
-                        symbol = EXCLUDED.symbol,
-                        position_type = EXCLUDED.position_type,
-                        volume = EXCLUDED.volume,
-                        open_price = EXCLUDED.open_price,
-                        current_price = EXCLUDED.current_price,
-                        sl = EXCLUDED.sl,
-                        tp = EXCLUDED.tp,
-                        profit = EXCLUDED.profit,
-                        open_time = COALESCE(
-                            open_positions.open_time,
-                            EXCLUDED.open_time
-                        ),
-                        updated_at = NOW()
-                """), {
-                    "ticket": int(pos.ticket),
-                    "account_number": account,
-                    "identifier": int(pos.identifier) if pos.identifier else None,
-                    "magic": int(pos.magic) if pos.magic else None,
-                    "sym": pos.symbol,
-                    "type": pos.side,
-                    "vol": pos.volume,
-                    "open_p": pos.price_open,
-                    "curr_p": current_p,
-                    "sl": pos.stop_loss,
-                    "tp": pos.take_profit,
-                    "profit": pos.profit,
-                    "open_time": open_time,
-                })
-
-            # 2. حذف الصفقات المغلقة لنفس الحساب فقط
-            live_tickets = [int(p.ticket) for p in req.positions if p.ticket]
-
-            if live_tickets:
-                # استخدام ANY بدل IN لتفادي مشاكل القوائم الفارغة
-                await db.execute(text("""
-                    DELETE FROM open_positions
-                    WHERE account_number = :acc
-                      AND ticket NOT IN :tickets
-                """).bindparams(
-                    # نستخدم expanding parameter
-                ), {
-                    "acc": account,
-                    # SQLAlchemy يوسّع القائمة تلقائيًا عند استخدام in_
-                })
-                # الطريقة الصحيحة مع text(): استخدام ANY
-                # نعيد التنفيذ بالطريقة الصحيحة:
-            # سنعيد التنفيذ بشكل صحيح أدناه (انظر التصحيح)
-        
         # --------------------------------------------------------
-        # إعادة تنفيذ الحذف بالطريقة الصحيحة
+        # 1. UPSERT لكل صفقة
+        # --------------------------------------------------------
+        for pos in req.positions:
+            current_p = float(pos.current_price or 0.0)
+            if current_p <= 0:
+                current_p = float(pos.price_open or 0.0)
+
+            open_time = pos.open_time or pos.updated_at or None
+
+            await db.execute(text("""
+                INSERT INTO open_positions (
+                    ticket, account_number, identifier, magic,
+                    symbol, position_type, volume,
+                    open_price, current_price, sl, tp, profit,
+                    open_time, updated_at
+                )
+                VALUES (
+                    :ticket, :account_number, :identifier, :magic,
+                    :sym, :type, :vol,
+                    :open_p, :curr_p, :sl, :tp, :profit,
+                    :open_time, NOW()
+                )
+                ON CONFLICT (ticket) DO UPDATE SET
+                    account_number = EXCLUDED.account_number,
+                    identifier = EXCLUDED.identifier,
+                    magic = EXCLUDED.magic,
+                    symbol = EXCLUDED.symbol,
+                    position_type = EXCLUDED.position_type,
+                    volume = EXCLUDED.volume,
+                    open_price = EXCLUDED.open_price,
+                    current_price = EXCLUDED.current_price,
+                    sl = EXCLUDED.sl,
+                    tp = EXCLUDED.tp,
+                    profit = EXCLUDED.profit,
+                    open_time = COALESCE(
+                        open_positions.open_time,
+                        EXCLUDED.open_time
+                    ),
+                    updated_at = NOW()
+            """), {
+                "ticket": int(pos.ticket),
+                "account_number": account,
+                "identifier": int(pos.identifier) if pos.identifier else None,
+                "magic": int(pos.magic) if pos.magic else None,
+                "sym": pos.symbol,
+                "type": pos.side,
+                "vol": pos.volume,
+                "open_p": pos.price_open,
+                "curr_p": current_p,
+                "sl": pos.stop_loss,
+                "tp": pos.take_profit,
+                "profit": pos.profit,
+                "open_time": open_time,
+            })
+
+        # --------------------------------------------------------
+        # 2. حذف الصفقات المغلقة لنفس الحساب فقط
+        # ✅ الطريقة الصحيحة: ticket != ALL(:tickets)
         # --------------------------------------------------------
         if req.positions:
             live_tickets = [int(p.ticket) for p in req.positions if p.ticket]
-            await db.execute(text("""
-                DELETE FROM open_positions
-                WHERE account_number = :acc
-                  AND ticket != ALL(:tickets)
-            """), {
-                "acc": account,
-                "tickets": live_tickets,
-            })
+            if live_tickets:
+                await db.execute(text("""
+                    DELETE FROM open_positions
+                    WHERE account_number = :acc
+                      AND ticket != ALL(:tickets)
+                """), {
+                    "acc": account,
+                    "tickets": live_tickets,
+                })
+            else:
+                await db.execute(text("""
+                    DELETE FROM open_positions
+                    WHERE account_number = :acc
+                """), {"acc": account})
         else:
-            # لا صفقات في الطلب = إغلاق كل صفقات هذا الحساب
             await db.execute(text("""
                 DELETE FROM open_positions
                 WHERE account_number = :acc
@@ -623,7 +611,7 @@ async def sync_positions(
         await db.commit()
 
         # --------------------------------------------------------
-        # تنظيف حالات الإدارة للصفقات المغلقة
+        # 3. تنظيف حالات الإدارة للصفقات المغلقة
         # --------------------------------------------------------
         try:
             command_repo = PositionCommandRepository(db)
@@ -644,7 +632,7 @@ async def sync_positions(
 
 
 # =====================================================================
-# 6. Pending Orders Sync — مُصلح
+# 6. Pending Orders Sync
 # =====================================================================
 
 @router.post("/pending-orders/sync")
@@ -655,8 +643,6 @@ async def sync_pending_orders(
 ):
     """
     مزامنة الأوامر المعلقة.
-
-    ✅ إصلاح: إزالة TRUNCATE، واستخدام UPSERT + حذف المفقود للحساب.
     """
     _authorize(x_mt5_key)
 
@@ -696,17 +682,23 @@ async def sync_pending_orders(
                 "tp": o.take_profit,
             })
 
-        # 2. حذف المفقود للحساب
+        # 2. حذف المفقود
         if req.orders:
             live_tickets = [int(o.ticket) for o in req.orders if o.ticket]
-            await db.execute(text("""
-                DELETE FROM pending_orders
-                WHERE account_number = :acc
-                  AND ticket != ALL(:tickets)
-            """), {
-                "acc": account,
-                "tickets": live_tickets,
-            })
+            if live_tickets:
+                await db.execute(text("""
+                    DELETE FROM pending_orders
+                    WHERE account_number = :acc
+                      AND ticket != ALL(:tickets)
+                """), {
+                    "acc": account,
+                    "tickets": live_tickets,
+                })
+            else:
+                await db.execute(text("""
+                    DELETE FROM pending_orders
+                    WHERE account_number = :acc
+                """), {"acc": account})
         else:
             await db.execute(text("""
                 DELETE FROM pending_orders
@@ -723,7 +715,7 @@ async def sync_pending_orders(
 
 
 # =====================================================================
-# 7. Symbol Specs Sync — مُصلح ليطابق Models
+# 7. Symbol Specs Sync
 # =====================================================================
 
 @router.post("/specs/sync")
@@ -734,10 +726,6 @@ async def sync_symbol_specs(
 ):
     """
     مزامنة مواصفات الرموز.
-
-    ✅ إصلاح: استخدام أسماء أعمدة Models (volume_min/max/step)
-    بدلًا من min_lot/max_lot/lot_step.
-    ✅ إضافة freeze_level_points.
     """
     _authorize(x_mt5_key)
 
@@ -764,16 +752,9 @@ async def sync_symbol_specs(
             tick_size = float(s.get("tick_size", 0.00001))
             contract_size = float(s.get("contract_size", 100000.0))
 
-            # ✅ دعم أسماء EA وModels
-            volume_min = float(
-                s.get("volume_min") or s.get("min_lot") or 0.01
-            )
-            volume_max = float(
-                s.get("volume_max") or s.get("max_lot") or 100.0
-            )
-            volume_step = float(
-                s.get("volume_step") or s.get("lot_step") or 0.01
-            )
+            volume_min = float(s.get("volume_min") or s.get("min_lot") or 0.01)
+            volume_max = float(s.get("volume_max") or s.get("max_lot") or 100.0)
+            volume_step = float(s.get("volume_step") or s.get("lot_step") or 0.01)
 
             stops_level_points = int(
                 s.get("stops_level_points") or s.get("stops") or 0
@@ -832,7 +813,7 @@ async def sync_symbol_specs(
 
 
 # =====================================================================
-# 8. Commands Polling (فتح صفقات جديدة) — مُصلح
+# 8. Commands Polling
 # =====================================================================
 
 @router.get("/commands")
@@ -845,9 +826,6 @@ async def get_pending_commands(
 ):
     """
     جلب أوامر فتح صفقات جديدة.
-
-    ⚠️ إصلاح أمني: account_number إلزامي.
-    فلترة ea_id وحدها لا تكفي.
     """
     _authorize(x_mt5_key)
 
@@ -898,7 +876,7 @@ async def get_pending_commands(
 
 
 # =====================================================================
-# 9. Command ACK — مُصلح
+# 9. Command ACK
 # =====================================================================
 
 @router.post("/commands/{command_id}/ack")
@@ -910,8 +888,6 @@ async def acknowledge_command(
 ):
     """
     تأكيد استلام أمر فتح صفقة.
-
-    ✅ إصلاح: التحقق من نجاح التحديث عبر RETURNING id.
     """
     _authorize(x_mt5_key)
 
@@ -943,7 +919,7 @@ async def acknowledge_command(
 
 
 # =====================================================================
-# 10. Command Report — مُصلح
+# 10. Command Report
 # =====================================================================
 
 @router.post("/commands/{command_id}/report")
@@ -955,20 +931,11 @@ async def report_execution_single(
 ):
     """
     تقرير تنفيذ أمر فتح صفقة.
-
-    ✅ إصلاح: استخدام update_command_result مع انتقالات صحيحة.
     """
     _authorize(x_mt5_key)
 
     try:
         repo = TradeRepository(db)
-        ticket_val = (
-            report.mt5_ticket
-            or report.mt5_order_ticket
-            or report.mt5_deal_ticket
-            or None
-        )
-
         updated = await repo.update_command_result(
             command_id=command_id,
             status=report.status,
@@ -995,7 +962,7 @@ async def report_execution_single(
 
 
 # =====================================================================
-# 11. Batch Reports — مُبقي كما هو (للملاءمة)
+# 11. Batch Reports
 # =====================================================================
 
 @router.post("/reports")
@@ -1029,7 +996,7 @@ async def report_execution(
 
 
 # =====================================================================
-# 12. Position Management Commands — جديد
+# 12. Position Management Commands
 # =====================================================================
 
 @router.get("/position-commands")
@@ -1042,8 +1009,6 @@ async def get_pending_position_commands(
 ):
     """
     جلب أوامر إدارة الصفقات المعلقة.
-
-    EA يستدعيها بشكل منفصل عن /commands.
     """
     _authorize(x_mt5_key)
 
@@ -1109,8 +1074,6 @@ async def acknowledge_position_command(
 ):
     """
     تأكيد استلام أمر إدارة صفقة.
-
-    يقبل UUID للـ command_id.
     """
     _authorize(x_mt5_key)
 
@@ -1119,7 +1082,6 @@ async def acknowledge_position_command(
         cmd = await repo.claim_command(command_id)
 
         if cmd is None:
-            # قد يكون محجوزًا مسبقًا
             raise HTTPException(
                 404,
                 "Position command not found or already claimed",
@@ -1144,8 +1106,6 @@ async def report_position_command(
 ):
     """
     تقرير تنفيذ أمر إدارة صفقة.
-
-    يحفظ القيم المنفذة فعليًا و mt5_retcode.
     """
     _authorize(x_mt5_key)
 
