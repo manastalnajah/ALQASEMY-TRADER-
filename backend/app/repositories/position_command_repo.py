@@ -472,23 +472,23 @@ class PositionCommandRepository:
     # حالة الإدارة - UPDATE PEAK PROFIT
     # ============================================================
 
-    async def update_peak_profit(
+        async def update_peak_profit(
         self,
         account_number: int,
         position_ticket: int,
         current_profit: float,
         current_price: Optional[float] = None,
+        position_type: str = "BUY",  # ✅ جديد
     ) -> Optional[PositionManagementState]:
         """
-        تحديث أعلى ربح عائم مرصود.
+        تحديث أعلى ربح عائم مرصود + أعلى سعر مواتٍ.
 
-        - إذا كان current_profit أكبر من max_floating_profit، نُحدّث.
-        - إذا كان current_price أكبر من max_favorable_price (لـ BUY)، نُحدّث.
-          أو أصغر (لـ SELL) — لكن لا نعرف نوع الصفقة هنا،
-          لذلك نحدّث فقط إذا كان current_price مختلفًا، وسيتولى المنادي
-          المنطق الصحيح.
+        - max_floating_profit: يُحدَّث فقط إذا كان current_profit أعلى.
+        - max_favorable_price:
+            * BUY:  يُحدَّث فقط إذا كان current_price أعلى من المخزون.
+            * SELL: يُحدَّث فقط إذا كان current_price أدنى من المخزون.
 
-        ملاحظة: هذه الدالة لا تُصفّر القمة أبدًا.
+        ملاحظة: هذه الدالة لا تُخفّض القمم أبدًا.
         """
         state = await self.get_state(account_number, position_ticket)
         if state is None:
@@ -496,27 +496,42 @@ class PositionCommandRepository:
 
         changed = False
 
+        # -------- max_floating_profit --------
         if current_profit > float(state.max_floating_profit or 0.0):
             state.max_floating_profit = current_profit
             changed = True
 
+        # -------- max_favorable_price --------
         if current_price is not None:
-            # نُحدّث فقط إذا كان السعر الحالي يزيد عن المسجل
-            # (المنادي مسؤول عن تمرير السعر المواتي فقط)
-            if state.max_favorable_price is None:
-                state.max_favorable_price = current_price
+            current_val = float(current_price)
+            stored_val = (
+                float(state.max_favorable_price)
+                if state.max_favorable_price is not None
+                else None
+            )
+
+            pos_type = (position_type or "BUY").upper()
+
+            if stored_val is None:
+                # أول تسجيل
+                state.max_favorable_price = current_val
                 changed = True
-            else:
-                # لنعتمد على المنادي: نمرر القيمة المواتية فقط
-                state.max_favorable_price = current_price
-                changed = True
+            elif pos_type == "BUY":
+                # BUY: القمة هي الأعلى
+                if current_val > stored_val:
+                    state.max_favorable_price = current_val
+                    changed = True
+            elif pos_type == "SELL":
+                # SELL: القمة هي الأدنى
+                if current_val < stored_val:
+                    state.max_favorable_price = current_val
+                    changed = True
 
         if changed:
             await self.db.commit()
             await self.db.refresh(state)
 
         return state
-
     # ============================================================
     # حالة الإدارة - UPDATE FLAGS
     # ============================================================
