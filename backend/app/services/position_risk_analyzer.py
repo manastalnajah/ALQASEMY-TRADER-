@@ -318,7 +318,7 @@ class PositionRiskAnalyzer:
         # نقصّ عند 0 إذا تحرك السعر عكس الصفقة
         return max(0.0, min(1.0, progress))
 
-    async def _fetch_candles(
+        async def _fetch_candles(
         self,
         symbol: str,
         timeframe: str,
@@ -326,7 +326,9 @@ class PositionRiskAnalyzer:
         """
         جلب آخر N شمعة من قاعدة البيانات.
 
-        يُفضّل أن تكون شموع مغلقة فقط (is_closed=True).
+        ⚠️ مهم: PostgreSQL NUMERIC يُرجع decimal.Decimal في Python.
+        نحول كل القيم الرقمية إلى float لتفادي أخطاء:
+            TypeError: unsupported operand type(s) for +: 'Decimal' and 'float'
         """
         try:
             query = text("""
@@ -343,8 +345,21 @@ class PositionRiskAnalyzer:
                 {"sym": symbol.upper(), "tf": timeframe.upper()},
             )
             rows = result.mappings().all()
-            # ترتيب تصاعدي
-            return [dict(r) for r in rows][::-1]
+
+            # ✅ تحويل صريح إلى float/int
+            candles = []
+            for r in rows:
+                candles.append({
+                    "open_time": r["open_time"],
+                    "open": _safe_float(r["open"]),
+                    "high": _safe_float(r["high"]),
+                    "low": _safe_float(r["low"]),
+                    "close": _safe_float(r["close"]),
+                    "volume": int(r["volume"]) if r["volume"] is not None else 0,
+                })
+
+            # ترتيب تصاعدي (الأقدم أولًا)
+            return candles[::-1]
 
         except Exception as exc:
             logger.warning(
@@ -352,7 +367,6 @@ class PositionRiskAnalyzer:
                 symbol, timeframe, exc,
             )
             return []
-
     @staticmethod
     def _detect_momentum_weakening(
         *,
