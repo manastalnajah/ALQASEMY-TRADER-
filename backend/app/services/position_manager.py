@@ -199,11 +199,17 @@ class SmartPositionManager:
     # جلب الصفقات
     # ============================================================
 
-    async def _fetch_open_positions(
+        async def _fetch_open_positions(
         self,
         account_number: int,
     ) -> list[OpenPosition]:
-        """جلب الصفقات المفتوحة للحساب من قاعدة البيانات."""
+        """
+        جلب الصفقات المفتوحة للحساب من قاعدة البيانات.
+
+        ⚠️ مهم: PostgreSQL NUMERIC يُرجع decimal.Decimal في Python.
+        نحول كل القيم الرقمية إلى float لتفادي أخطاء:
+            TypeError: unsupported operand type(s) for +: 'Decimal' and 'float'
+        """
         stmt = text("""
             SELECT ticket, account_number, symbol, position_type,
                    volume, open_price, current_price, sl, tp, profit,
@@ -219,23 +225,26 @@ class SmartPositionManager:
         positions = []
         for row in rows:
             pos = OpenPosition()
-            pos.ticket = row["ticket"]
-            pos.account_number = row["account_number"]
-            pos.symbol = row["symbol"]
-            pos.position_type = row["position_type"]
-            pos.volume = row["volume"]
-            pos.open_price = row["open_price"]
-            pos.current_price = row["current_price"]
-            pos.sl = row["sl"]
-            pos.tp = row["tp"]
-            pos.profit = row["profit"]
+            pos.ticket = int(row["ticket"])
+            pos.account_number = int(row["account_number"])
+            pos.symbol = str(row["symbol"])
+            pos.position_type = str(row["position_type"])
+
+            # ✅ تحويل صريح إلى float (Decimal → float)
+            pos.volume = self._safe_float(row["volume"])
+            pos.open_price = self._safe_float(row["open_price"])
+            pos.current_price = self._safe_float(row["current_price"])
+            pos.sl = self._safe_float(row["sl"])
+            pos.tp = self._safe_float(row["tp"])
+            pos.profit = self._safe_float(row["profit"])
+
             pos.identifier = row.get("identifier")
             pos.magic = row.get("magic")
             pos.open_time = row.get("open_time")
+
             positions.append(pos)
 
         return positions
-
     # ============================================================
     # معالجة صفقة واحدة
     # ============================================================
