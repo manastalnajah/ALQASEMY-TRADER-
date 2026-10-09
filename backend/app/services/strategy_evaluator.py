@@ -305,7 +305,7 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
         if calculated_lot_size <= 0:
             return {"status": "blocked", "decision": "HOLD", "message": "Zero lot size calculated (Risk block)"}
 
-        signal_key = f"{symbol}|{executed_strategy}|{timeframe}|{candle_key}|{final_decision}|{int(entry)}"
+        signal_key = f"{symbol}|{executed_strategy}|{timeframe}|{candle_key}|{final_decision}"
 
         command = schemas.CommandCreate(
             symbol=symbol,
