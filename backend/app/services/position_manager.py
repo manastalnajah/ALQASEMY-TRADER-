@@ -199,7 +199,7 @@ class SmartPositionManager:
     # جلب الصفقات
     # ============================================================
 
-        async def _fetch_open_positions(
+    async def _fetch_open_positions(
         self,
         account_number: int,
     ) -> list[OpenPosition]:
