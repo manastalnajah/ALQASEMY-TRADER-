@@ -1,13 +1,11 @@
 # ============================================================
 # app/workers/trading_worker.py
-# النسخة: 2.1.0
+# النسخة: 2.2.0
 # ------------------------------------------------------------
-# التغييرات عن 2.0.0:
-# - توحيد فلتر الحسابات مع position_manager_worker
-#   (is_active, is_trade_allowed)
-# - تحسين إدارة advisory lock مع try/finally
-# - توثيق أوضح
-# - سجل أكثر تفصيلاً
+# التغييرات عن 2.1.0:
+# - ✅ إصلاح حرج: تمرير balance, equity, tick_size, tick_value
+#   إلى market_data (كانت مفقودة → "Balance not found")
+# - ✅ تحديث استعلام active_accounts لجلب balance و equity
 # ============================================================
 
 import asyncio
@@ -212,6 +210,10 @@ async def analyze_symbol(
         )
         return
 
+    # استخراج مسبق لقيم المواصفات (تُستخدم لكل حساب)
+    tick_size_val = float(spec["tick_size"] or 0.0)
+    tick_value_val = float(spec["tick_value"] or 0.0)
+
     # --------------------------------------------------------
     # 5. بناء market_data
     # --------------------------------------------------------
@@ -247,6 +249,9 @@ async def analyze_symbol(
         "ma_14": _get_last_val(ma14),
         "ma_14_prev": _get_last_val(ma14_prev),
         "point": float(spec["point"]),
+        # ✅ مواصفات الرمز (مشتركة بين الحسابات)
+        "tick_size": tick_size_val,
+        "tick_value": tick_value_val,
     }
 
     # --------------------------------------------------------
@@ -256,6 +261,12 @@ async def analyze_symbol(
         market_for_account = market.copy()
         market_for_account["ea_id"] = str(account["ea_id"] or "")
         market_for_account["account_number"] = int(account["account_number"])
+
+        # ✅ جديد: رأس المال لكل حساب
+        market_for_account["balance"] = float(account.get("balance") or 0.0)
+        market_for_account["equity"] = float(account.get("equity") or 0.0)
+        market_for_account["currency"] = str(account.get("currency") or "USD")
+
         account_id = str(account["id"])
 
         for strategy_name in config.enabled_strategies:
@@ -315,10 +326,10 @@ async def run_cycle():
 
             # --------------------------------------------------
             # 3. جلب الحسابات النشطة
-            # ✅ فلتر موحّد مع position_manager_worker
+            # ✅ جلب balance و equity و currency
             # --------------------------------------------------
             active_accounts = (await db.execute(text("""
-                SELECT id, account_number, ea_id
+                SELECT id, account_number, ea_id, balance, equity, currency
                 FROM trading_accounts
                 WHERE is_connected = true
                   AND is_active = true
