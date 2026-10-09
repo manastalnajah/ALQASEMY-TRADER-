@@ -516,7 +516,7 @@ async def sync_positions(
     - إزالة TRUNCATE.
     - حفظ current_price الحقيقي من EA.
     - حفظ identifier, magic, open_time.
-    - حذف الصفقات المغلقة لنفس الحساب فقط عبر != ALL(:tickets).
+    - حذف الصفقات المغلقة لنفس الحساب فقط عبر NOT IN مع expanding bindparam.
     - تنظيف حالات الإدارة للصفقات المغلقة.
     """
     _authorize(x_mt5_key)
@@ -584,25 +584,34 @@ async def sync_positions(
 
         # --------------------------------------------------------
         # 2. حذف الصفقات المغلقة لنفس الحساب فقط
-        # ✅ الطريقة الصحيحة: ticket != ALL(:tickets)
+        # ✅ الطريقة الصحيحة: NOT IN مع expanding bindparam
         # --------------------------------------------------------
         if req.positions:
             live_tickets = [int(p.ticket) for p in req.positions if p.ticket]
+
             if live_tickets:
-                await db.execute(text("""
+                from sqlalchemy import bindparam
+
+                stmt = text("""
                     DELETE FROM open_positions
                     WHERE account_number = :acc
-                      AND ticket != ALL(:tickets)
-                """), {
+                      AND ticket NOT IN :tickets
+                """).bindparams(
+                    bindparam("tickets", expanding=True)
+                )
+
+                await db.execute(stmt, {
                     "acc": account,
                     "tickets": live_tickets,
                 })
             else:
+                # لا تذاكر صالحة — احذف كل صفوف الحساب
                 await db.execute(text("""
                     DELETE FROM open_positions
                     WHERE account_number = :acc
                 """), {"acc": account})
         else:
+            # لا صفقات — احذف كل صفوف الحساب
             await db.execute(text("""
                 DELETE FROM open_positions
                 WHERE account_number = :acc
@@ -629,8 +638,6 @@ async def sync_positions(
         await db.rollback()
         logger.exception("Sync positions failed: %s", exc)
         raise HTTPException(500, "Sync positions failed")
-
-
 # =====================================================================
 # 6. Pending Orders Sync
 # =====================================================================
@@ -643,6 +650,8 @@ async def sync_pending_orders(
 ):
     """
     مزامنة الأوامر المعلقة.
+
+    ✅ إصلاح: استخدام NOT IN مع expanding bindparam بدل != ALL.
     """
     _authorize(x_mt5_key)
 
@@ -683,14 +692,22 @@ async def sync_pending_orders(
             })
 
         # 2. حذف المفقود
+        # ✅ الطريقة الصحيحة: NOT IN مع expanding bindparam
         if req.orders:
             live_tickets = [int(o.ticket) for o in req.orders if o.ticket]
+
             if live_tickets:
-                await db.execute(text("""
+                from sqlalchemy import bindparam
+
+                stmt = text("""
                     DELETE FROM pending_orders
                     WHERE account_number = :acc
-                      AND ticket != ALL(:tickets)
-                """), {
+                      AND ticket NOT IN :tickets
+                """).bindparams(
+                    bindparam("tickets", expanding=True)
+                )
+
+                await db.execute(stmt, {
                     "acc": account,
                     "tickets": live_tickets,
                 })
@@ -712,7 +729,6 @@ async def sync_pending_orders(
         await db.rollback()
         logger.exception("Pending orders sync failed: %s", exc)
         raise HTTPException(500, "Pending orders synchronization failed")
-
 
 # =====================================================================
 # 7. Symbol Specs Sync
