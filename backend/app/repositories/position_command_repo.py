@@ -472,7 +472,7 @@ class PositionCommandRepository:
     # حالة الإدارة - UPDATE PEAK PROFIT
     # ============================================================
 
-        async def update_peak_profit(
+    async def update_peak_profit(
         self,
         account_number: int,
         position_ticket: int,
