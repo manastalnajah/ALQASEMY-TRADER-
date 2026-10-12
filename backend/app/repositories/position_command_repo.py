@@ -472,13 +472,13 @@ class PositionCommandRepository:
     # حالة الإدارة - UPDATE PEAK PROFIT
     # ============================================================
 
-    async def update_peak_profit(
+        async def update_peak_profit(
         self,
         account_number: int,
         position_ticket: int,
         current_profit: float,
         current_price: Optional[float] = None,
-        position_type: str = "BUY",  # ✅ جديد
+        position_type: str = "BUY",
     ) -> Optional[PositionManagementState]:
         """
         تحديث أعلى ربح عائم مرصود + أعلى سعر مواتٍ.
@@ -489,6 +489,7 @@ class PositionCommandRepository:
             * SELL: يُحدَّث فقط إذا كان current_price أدنى من المخزون.
 
         ملاحظة: هذه الدالة لا تُخفّض القمم أبدًا.
+        ⚠️ تحديث updated_at دائمًا — للمراقبة.
         """
         state = await self.get_state(account_number, position_ticket)
         if state is None:
@@ -527,9 +528,12 @@ class PositionCommandRepository:
                     state.max_favorable_price = current_val
                     changed = True
 
-        if changed:
-            await self.db.commit()
-            await self.db.refresh(state)
+        # ✅ تحديث updated_at دائمًا — للتأكد من أن العامل يعمل
+        state.updated_at = self._utc_now()
+
+        # ✅ حفظ دائمًا
+        await self.db.commit()
+        await self.db.refresh(state)
 
         return state
     # ============================================================
