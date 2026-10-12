@@ -1,16 +1,23 @@
-from sqlalchemy.ext.asyncio import AsyncSession  # 🛠️ تم التحديث لدعم Async
+from __future__ import annotations
+
+import math
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+
 from app.strategies.strategy_manager import manager as strategy_manager
 from app.services import trade_service
 from app.domain import schemas
 from app.logging.logger import system_logger
 from app.config import config
-from datetime import datetime, timezone
 
-# 🚀 استدعاء المحرك الرياضي الجديد للعمل كدرع حماية
+# 🚀 استدعاء المحركات (الكمي + بنية السوق)
 from app.services.quant_analyzer import QuantAnalyzer
+from app.services.market_structure_engine import MarketStructureEngine
 
 quant_analyzer = QuantAnalyzer()
+msce = MarketStructureEngine(quant_analyzer)
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -45,7 +52,6 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
         symbol = str(market_data.get("symbol", "")).upper()
 
         if atr <= 0:
-            # قيمة افتراضية آمنة للوقف في حال عدم توفر ATR لحظياً (30 نقطة لليورو و 2.0 دولار للذهب)
             atr = 2.0 if "XAU" in symbol else 0.0030
 
         risk_distance = atr * getattr(config, "atr_sl_multiplier", 1.5)
@@ -60,17 +66,12 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
         else:
             return 0.0, 0.0
 
-    # ==================================================
     # 🛡️ صمام الأمان الرياضي (Minimum Stop Loss Distance)
-    # لمنع ضرب السبريد للصفقات (تم إضافة الحماية هنا)
-    # ==================================================
     symbol = str(market_data.get("symbol", "")).upper()
     point_size = 0.01 if "XAU" in symbol or "JPY" in symbol else 0.00001
     
-    # الحد الأدنى المسموح به بالـ Points (مثلاً 150 Point = 15 Pip)
     MINIMUM_SL_POINTS = 150.0 
     min_distance = MINIMUM_SL_POINTS * point_size
-
     current_distance = abs(entry - calculated_sl)
 
     if current_distance < min_distance:
@@ -87,11 +88,11 @@ def _build_protection(market_data: dict, decision: str, entry: float, sl: float,
 
 
 def _calculate_dynamic_lot(symbol: str, entry: float, sl: float, market_data: dict) -> float:
-    """الحساب النهائي للوت مع الحماية ضد انعدام الرصيد أو انهيار الاتصال"""
+    """الحساب المبدئي للوت (سيتم تدقيقه في trade_service لاحقاً)"""
     balance_raw = market_data.get("balance") or market_data.get("equity")
     if balance_raw is None:
         system_logger.error(f"🛑 CRITICAL: Balance not found for {symbol}. Blocking execution.")
-        return 0.0  # إيقاف التنفيذ لحماية الحساب
+        return 0.0 
 
     balance = _safe_float(balance_raw)
     if balance <= 0:
@@ -111,7 +112,6 @@ def _calculate_dynamic_lot(symbol: str, entry: float, sl: float, market_data: di
         ticks_at_risk = sl_distance / tick_size
         lot_size = risk_amount / (ticks_at_risk * tick_value)
     else:
-        # معادلات الطوارئ المحسنة
         lot_size = risk_amount / (sl_distance * (100 if "XAU" in symbol else 1000 if "JPY" in symbol else 100000))
 
     lot_size = round(lot_size, 2)
@@ -119,7 +119,6 @@ def _calculate_dynamic_lot(symbol: str, entry: float, sl: float, market_data: di
     return max(0.01, min(lot_size, max_lots))
 
 
-# محرك رياضي داخلي لحساب RSI من قاعدة البيانات لضمان دقة الإشارات
 def calculate_rsi(prices: list, period: int = 14) -> float:
     if len(prices) < period + 1:
         return 50.0
@@ -147,7 +146,9 @@ def calculate_rsi(prices: list, period: int = 14) -> float:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-# 🛠️ الدالة الرئيسية لتنفيذ وتقييم الاستراتيجيات مع الدرع الرياضي
+# ==================================================
+# 🛠️ الدالة الرئيسية لتنفيذ وتقييم الاستراتيجيات مع بوابة MSCE
+# ==================================================
 async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strategy_name: str, market_data: dict):
     symbol = str(market_data.get("symbol") or "").upper()
     timeframe = str(market_data.get("timeframe") or getattr(config, "timeframe", "M5")).upper()
@@ -156,31 +157,46 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
     if not symbol or not candle_key:
         return {"status": "ignored", "decision": "HOLD", "message": "Missing identity"}
 
-    # ==================================================
-    # 🛡️ فلتر أوقات الجلسات العالمية الفعالة
-    # ملاحظة: إذا أردت أن يتداول البوت 24 ساعة، قم بتغيير 7 و 21 لتصبح 1 و 23
-    # ==================================================
+    # 🛡️ فلتر أوقات الجلسات العالمية הפعالة
     current_utc_hour = datetime.now(timezone.utc).hour
     if not (7 <= current_utc_hour <= 21):
         system_logger.info(f"⏳ HOLD: {symbol} is outside active session hours (Current UTC: {current_utc_hour}).")
         return {"status": "ignored", "decision": "HOLD", "message": "Outside active market sessions"}
 
-    current_volume = _safe_float(market_data.get("volume"), 0.0)
-    
     # ==================================================
-    # 🚀 تجهيز البيانات الشاملة
+    # 🚀 جلب البيانات للأطر الزمنية المختلفة لتعمل كأدلة
     # ==================================================
     try:
-        rows = (await db.execute(text("""
+        # 1. إطار العمل الأساسي (M5 عادةً)
+        rows_main = (await db.execute(text("""
             SELECT open_time, open, high, low, close, volume 
             FROM candles 
             WHERE symbol_name = :sym AND timeframe = :tf 
             ORDER BY open_time DESC LIMIT 150
         """), {"sym": symbol, "tf": timeframe})).mappings().all()
 
-        candles_list = [dict(r) for r in rows][::-1]
+        candles_list = [dict(r) for r in rows_main][::-1]
         market_data["candles"] = candles_list
 
+        # 2. إطار M15 لمحرك بنية السوق
+        rows_m15 = (await db.execute(text("""
+            SELECT open_time, open, high, low, close 
+            FROM candles 
+            WHERE symbol_name = :sym AND timeframe = 'M15' 
+            ORDER BY open_time DESC LIMIT 20
+        """), {"sym": symbol})).mappings().all()
+        candles_m15 = [dict(r) for r in rows_m15][::-1]
+
+        # 3. إطار H1 لمحرك بنية السوق
+        rows_h1 = (await db.execute(text("""
+            SELECT open_time, open, high, low, close 
+            FROM candles 
+            WHERE symbol_name = :sym AND timeframe = 'H1' 
+            ORDER BY open_time DESC LIMIT 20
+        """), {"sym": symbol})).mappings().all()
+        candles_h1 = [dict(r) for r in rows_h1][::-1]
+
+        # الدعوم والمقاومات
         if len(candles_list) >= 40:
             recent_40 = candles_list[-40:]
             market_data["support"] = min(float(c["low"]) for c in recent_40)
@@ -196,14 +212,16 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
         return {"status": "error", "decision": "HOLD", "message": "Data preparation failed"}
 
     # ==================================================
-    # 🧮 تجهيز الدرع الرياضي (Quant Shield) للبيانات الحالية
+    # 🧮 توليد التقارير: الكمي (Quant) و البنيوي (MSCE)
     # ==================================================
     close_prices = [float(c["close"]) for c in candles_list]
     quant_report = quant_analyzer.analyze_single_asset(close_prices)
+    structure_report = msce.analyze_structure(candles_h1, candles_m15)
+    z_score = quant_report.get("z_score", 0.0)
 
     try:
         # ==================================================
-        # 🧠 حلقة العقول المدبرة (Multi-Strategy Engine)
+        # 🧠 حلقة العقول المدبرة: الاستراتيجيات تقترح، والمحرك يقرر
         # ==================================================
         active_strategies = ["rsi_reversion", "golden_setup", "smart_limits"]
         
@@ -220,9 +238,10 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
             if strat == "golden_setup" and not getattr(config, "allow_golden_setup", True):
                 continue
 
+            # توليد الإشارة
             if strat == "rsi_reversion":
-                if len(rows) >= 15:
-                    prices = [float(r["close"]) for r in rows][::-1]
+                if len(rows_main) >= 15:
+                    prices = [float(r["close"]) for r in rows_main][::-1]
                     rsi_value = calculate_rsi(prices, period=14)
                     oversold = getattr(config, "rsi_oversold_level", 30.0)
                     overbought = getattr(config, "rsi_overbought_level", 70.0)
@@ -235,53 +254,41 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
                 result = strategy_manager.execute(strat, market_data)
                 decision = str(result.get("decision", "HOLD")).upper() if isinstance(result, dict) else str(result).upper()
 
+            # --------------------------------------------------
+            # 🛡️ بوابة التأكيد (إذا كانت هناك إشارة مقترحة)
+            # --------------------------------------------------
             if decision != "HOLD":
+                candidate = {"signal": decision, "strategy": strat}
+                
+                # 1. فحص بنية السوق (MSCE Gatekeeper)
+                evaluation = msce.evaluate_candidate(candidate, structure_report, quant_report)
+                if not evaluation.get("approved", False):
+                    system_logger.info(f"🚫 MSCE Rejected {decision} from {strat}: {evaluation.get('reason')}")
+                    # ننتقل لفحص الاستراتيجية التالية ولا نوقف الحلقة!
+                    continue
+
+                # 2. درع الانحراف المعياري الخاص بالذهب (Quant Shield)
+                if "XAU" in symbol:
+                    if decision in ["BUY", "BUY_LIMIT", "BUY_STOP"] and z_score > -1.0:
+                        system_logger.warning(f"🛡️ Gold Quant Shield: Blocked {decision} on {symbol} (Z-Score {z_score:.2f} unsafe)")
+                        continue
+                    elif decision in ["SELL", "SELL_LIMIT", "SELL_STOP"] and z_score < 1.0:
+                        system_logger.warning(f"🛡️ Gold Quant Shield: Blocked {decision} on {symbol} (Z-Score {z_score:.2f} unsafe)")
+                        continue
+
+                # إذا نجحت الإشارة في اجتياز جميع البوابات
                 final_decision = decision
                 final_result = result if isinstance(result, dict) else {}
                 executed_strategy = strat
-                break
+                break # وجدنا إشارة صحيحة ומؤكدة، نتوقف عن فحص باقي الاستراتيجيات
 
+        # ==================================================
+        # 🎯 مرحلة بناء الأمر إذا تم اعتماد قرار
+        # ==================================================
         if final_decision == "HOLD":
             return {"status": "success", "decision": "HOLD"}
 
-        # ==================================================
-        # 🛡️ تفعيل الدرع الرياضي (Quant Shield) قبل التنفيذ
-        # ==================================================
-        regime = quant_report.get("market_regime", "RANDOM")
-        hurst = quant_report.get("hurst_exponent", 0.5)
-        z_score = quant_report.get("z_score", 0.0)
-
-        # استراتيجيات الارتداد التي تعاني من الترند القوي
-        is_reversion_strategy = executed_strategy in ["rsi_reversion", "smart_limits"]
-
-        # 1. منع التداول عكس الاتجاه القوي (الفلتر العام لجميع الأزواج)
-        if is_reversion_strategy and regime == "TRENDING":
-            system_logger.warning(
-                f"🛡️ Quant Shield Activated: Blocked {final_decision} on {symbol}. "
-                f"Market is violently TRENDING (Hurst={hurst:.2f}). Mean-reversion blocked!"
-            )
-            return {"status": "blocked", "decision": "HOLD", "message": "Blocked by Quant Shield (Trending Market)"}
-
-        # 2. درع الانحراف المعياري (Z-Score) مخصص للذهب لخطورته
-        if "XAU" in symbol:
-            if final_decision in ["BUY", "BUY_LIMIT", "BUY_STOP"] and z_score > -1.0:
-                system_logger.warning(
-                    f"🛡️ Gold Quant Shield: Blocked BUY on {symbol}. "
-                    f"Z-Score ({z_score:.2f}) is not low enough. Price hasn't dropped mathematically enough to buy safely."
-                )
-                return {"status": "blocked", "decision": "HOLD", "message": "Blocked by Quant Shield (Z-Score unsafe for BUY)"}
-                
-            elif final_decision in ["SELL", "SELL_LIMIT", "SELL_STOP"] and z_score < 1.0:
-                system_logger.warning(
-                    f"🛡️ Gold Quant Shield: Blocked SELL on {symbol}. "
-                    f"Z-Score ({z_score:.2f}) is not high enough. Price hasn't risen mathematically enough to sell safely."
-                )
-                return {"status": "blocked", "decision": "HOLD", "message": "Blocked by Quant Shield (Z-Score unsafe for SELL)"}
-
-        # ==================================================
-        # 🎯 معالجة أمر التنفيذ النهائي
-        # ==================================================
-        system_logger.info(f"🎯 ACTUAL SIGNAL TRIGGERED: {final_decision} on {symbol} (Strategy: {executed_strategy})")
+        system_logger.info(f"🎯 ACTUAL SIGNAL APPROVED: {final_decision} on {symbol} (Strategy: {executed_strategy})")
 
         entry = _safe_float(final_result.get("entry_price", 0.0))
         if entry <= 0:
@@ -290,7 +297,6 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
         sl_raw = _safe_float(final_result.get("sl", market_data.get("sl", 0.0)))
         tp_raw = _safe_float(final_result.get("tp", market_data.get("tp", 0.0)))
         
-        # استدعاء دالة بناء الحماية التي تحتوي على صمام الأمان الجديد
         sl, tp = _build_protection(market_data, final_decision, entry, sl_raw, tp_raw)
         
         if sl <= 0 or tp <= 0:
@@ -317,10 +323,10 @@ async def evaluate_and_execute_strategy(db: AsyncSession, account_id: str, strat
             strategy_name=executed_strategy,
             signal_key=signal_key,
             ea_id=str(market_data.get("ea_id") or ""),
-            # ✅ تم تمرير account_number هنا لضمان عمل الصفقات الآلية وربطها بالتطبيق
             account_number=int(market_data.get("account_number")) if market_data.get("account_number") else None
         )
 
+        # الإرسال لـ trade_service حيث سيتم تفعيل محرك إدارة المخاطر النهائي (validate_and_size)
         created = await trade_service.process_new_command(
             db=db,
             command=command,
