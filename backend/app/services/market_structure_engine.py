@@ -1,7 +1,7 @@
 # app/services/market_structure_engine.py
 
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 logger = logging.getLogger("AlqasemyTrader.MSCE")
 
@@ -9,15 +9,14 @@ class MarketStructureEngine:
     def __init__(self, quant_analyzer=None):
         self.quant = quant_analyzer
 
-    def _find_swings(self, candles: List[Dict], left: int = 3, right: int = 3) -> Dict:
+    def _find_swings(self, candles: List[Dict], left: int = 2, right: int = 2) -> Dict:
         """
-        استخراج القمم والقيعان المحورية (Swing Points) بصرامة.
-        زيادة left/right إلى 3 لتقليل الضوضاء وتأكيد المحاور.
+        استخراج القمم والقيعان (Fractals).
+        التقليل إلى 2 يعطي مرونة ممتازة لالتقاط الهيكل الحقيقي للسوق دون تأخير كبير.
         """
         swing_highs = []
         swing_lows = []
         
-        # حماية صارمة ضد الـ Look-ahead bias
         for i in range(left, len(candles) - right):
             current_high = candles[i]['high']
             current_low = candles[i]['low']
@@ -27,30 +26,29 @@ class MarketStructureEngine:
             
             for j in range(i - left, i + right + 1):
                 if i != j:
-                    if candles[j]['high'] >= current_high: is_sh = False
-                    if candles[j]['low'] <= current_low: is_sl = False
+                    if candles[j]['high'] > current_high: is_sh = False
+                    if candles[j]['low'] < current_low: is_sl = False
                     
-            if is_sh: swing_highs.append({"index": i, "price": current_high, "candle": candles[i]})
-            if is_sl: swing_lows.append({"index": i, "price": current_low, "candle": candles[i]})
+            if is_sh: swing_highs.append({"index": i, "price": current_high})
+            if is_sl: swing_lows.append({"index": i, "price": current_low})
             
         return {"highs": swing_highs, "lows": swing_lows}
 
     def _analyze_timeframe_structure(self, candles: List[Dict], name: str) -> Dict:
-        """
-        تحليل البنية التسلسلي (Sequential Structure Analysis).
-        يمسح التاريخ لتحديد السياق الحالي (BOS, CHoCH, Trend).
-        """
-        if len(candles) < 30:
+        """يحلل البنية ويمسح التاريخ لتحديد السياق الحالي."""
+        if len(candles) < 20:
             return {"trend": "UNKNOWN", "bos": "NONE", "choch": "NONE", "structure": "UNKNOWN"}
 
-        swings = self._find_swings(candles, left=3, right=3)
+        # استخدام مرونة أكبر في إطار M5 السريع
+        l_r = 1 if name == "M5" else 2
+        swings = self._find_swings(candles, left=l_r, right=l_r)
+        
         highs = swings["highs"]
         lows = swings["lows"]
 
         if len(highs) < 2 or len(lows) < 2:
             return {"trend": "RANGE", "bos": "NONE", "choch": "NONE", "structure": "CONSOLIDATION"}
 
-        # تتبع تطور البنية
         last_high = highs[-1]
         prev_high = highs[-2]
         last_low = lows[-1]
@@ -61,43 +59,33 @@ class MarketStructureEngine:
         hl = last_low['price'] > prev_low['price']
         ll = last_low['price'] < prev_low['price']
 
-        # تحديد البنية العامة المستمرة (Swing Structure)
         structure = "RANGE"
         if hh and hl: structure = "BULLISH"
         elif lh and ll: structure = "BEARISH"
         
-        # ----------------------------------------------------
-        # اكتشاف الـ Break of Structure (BOS) و Change of Character (CHoCH)
-        # بالاعتماد على إغلاقات الشموع الأخيرة بعد آخر قمة/قاع
-        # ----------------------------------------------------
         bos = "NONE"
         choch = "NONE"
         trend_status = "NEUTRAL"
         
-        # نأخذ آخر 5 شموع مغلقة لفحص الاختراقات القريبة
-        recent_closes = [c['close'] for c in candles[-5:]]
-        max_recent_close = max(recent_closes)
-        min_recent_close = min(recent_closes)
+        # الاعتماد على السعر الحالي المباشر (آخر شمعة) لفحص الكسر بدلاً من متوسط الإغلاقات
+        current_price = candles[-1]['close']
 
-        # 1. تحليل الاختراق الصاعد
-        if max_recent_close > last_high['price']:
+        if current_price > last_high['price']:
             if structure == "BULLISH":
-                bos = "BULLISH_BOS" # استمرار صعود
+                bos = "BULLISH_BOS"
                 trend_status = "TREND_UP"
-            elif structure == "BEARISH":
-                choch = "BULLISH_CHOCH" # أول علامة انعكاس لأعلى
+            elif structure == "BEARISH" or structure == "RANGE":
+                choch = "BULLISH_CHOCH"
                 trend_status = "TRANSITION_UP"
                 
-        # 2. تحليل الاختراق الهابط
-        elif min_recent_close < last_low['price']:
+        elif current_price < last_low['price']:
             if structure == "BEARISH":
-                bos = "BEARISH_BOS" # استمرار هبوط
+                bos = "BEARISH_BOS"
                 trend_status = "TREND_DOWN"
-            elif structure == "BULLISH":
-                choch = "BEARISH_CHOCH" # أول علامة انعكاس لأسفل
+            elif structure == "BULLISH" or structure == "RANGE":
+                choch = "BEARISH_CHOCH"
                 trend_status = "TRANSITION_DOWN"
 
-        # إذا لم يكن هناك كسر حديث، نعتمد على البنية الأساسية
         if trend_status == "NEUTRAL":
             if structure == "BULLISH": trend_status = "TREND_UP"
             elif structure == "BEARISH": trend_status = "TREND_DOWN"
@@ -121,8 +109,8 @@ class MarketStructureEngine:
 
     def evaluate_candidate(self, candidate_signal: Dict, structure: Dict, quant_report: Dict) -> Dict:
         """
-        بوابة العبور الاحترافية.
-        تقييم الإشارة بناءً على التوافق بين الأطر الثلاثة، والتمييز بين الارتداد والاستمرار.
+        بوابة العبور المرنة والمحسنة.
+        تسمح بفرص الانعكاس السريع والتصحيحات إذا كانت مدعومة من M5.
         """
         signal = str(candidate_signal.get("signal", "")).upper()
         if signal not in ["BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP"]:
@@ -136,58 +124,39 @@ class MarketStructureEngine:
         m5 = structure["M5"]
 
         # ========================================================
-        # 1. شروط الرفض القطعي (Hard Rejections - Default Deny)
+        # 1. شروط الموافقة (Approval Criteria)
         # ========================================================
         if is_buy:
-            # الترند العام هابط والبنية على M15 مستمرة في الهبوط (لا BOS ولا CHoCH صاعد)
-            if h1["trend"] in ["TREND_DOWN", "TRANSITION_DOWN"] and m15["trend"] == "TREND_DOWN":
-                if m15["choch"] != "BULLISH_CHOCH" and m5["choch"] != "BULLISH_CHOCH":
-                    return {"approved": False, "reason": "BUY rejected: Strong H1/M15 Bearish flow with no Bullish CHoCH."}
-            
-            # M5 يكسر قيعان للتو (لا تشتري السكين الساقطة)
-            if m5["bos"] == "BEARISH_BOS" or m5["choch"] == "BEARISH_CHOCH":
-                return {"approved": False, "reason": "BUY rejected: M5 is actively breaking structure downwards."}
-
-        if is_sell:
-            # الترند العام صاعد والبنية على M15 مستمرة في الصعود (لا BOS ولا CHoCH هابط)
-            if h1["trend"] in ["TREND_UP", "TRANSITION_UP"] and m15["trend"] == "TREND_UP":
-                if m15["choch"] != "BEARISH_CHOCH" and m5["choch"] != "BEARISH_CHOCH":
-                    return {"approved": False, "reason": "SELL rejected: Strong H1/M15 Bullish flow with no Bearish CHoCH."}
-
-            # M5 يكسر قمم للتو (لا تبع في وجه صعود حاد)
+            # صيد ارتداد (Reversion) قوي على إطار M5 السريع
             if m5["bos"] == "BULLISH_BOS" or m5["choch"] == "BULLISH_CHOCH":
-                return {"approved": False, "reason": "SELL rejected: M5 is actively breaking structure upwards."}
-
-        # ========================================================
-        # 2. شروط الموافقة (Approval Criteria)
-        # يجب إثبات الدافع للدخول
-        # ========================================================
-        if is_buy:
-            # 1. الاستمرار مع الترند: H1 صاعد، و M15 يؤكد
-            if h1["trend"] == "TREND_UP" and m15["trend"] in ["TREND_UP", "RANGE"]:
-                return {"approved": True, "reason": "BUY approved: Trend Continuation (H1/M15 aligned)."}
+                return {"approved": True, "reason": "BUY approved: Momentum shifting up on M5 (BOS/CHoCH)."}
             
-            # 2. صيد الانعكاس المؤكد: سياق هابط لكن M15 و M5 كسرا لأعلى (CHoCH)
-            if m15["choch"] == "BULLISH_CHOCH" and m5["trend"] in ["TREND_UP", "TRANSITION_UP"]:
-                return {"approved": True, "reason": "BUY approved: Bullish CHoCH confirmed on M15 & M5."}
+            # توافق عام صاعد (H1 صاعد، و M15 لا يعارضه)
+            if h1["trend"] in ["TREND_UP", "TRANSITION_UP"] and m15["trend"] != "TREND_DOWN":
+                return {"approved": True, "reason": "BUY approved: Trend Continuation (H1 Bullish context)."}
 
         if is_sell:
-            # 1. الاستمرار مع الترند: H1 هابط، و M15 يؤكد
-            if h1["trend"] == "TREND_DOWN" and m15["trend"] in ["TREND_DOWN", "RANGE"]:
-                return {"approved": True, "reason": "SELL approved: Trend Continuation (H1/M15 aligned)."}
+            # صيد ارتداد (Reversion) قوي على إطار M5 السريع
+            if m5["bos"] == "BEARISH_BOS" or m5["choch"] == "BEARISH_CHOCH":
+                return {"approved": True, "reason": "SELL approved: Momentum shifting down on M5 (BOS/CHoCH)."}
             
-            # 2. صيد الانعكاس المؤكد: سياق صاعد لكن M15 و M5 كسرا لأسفل (CHoCH)
-            if m15["choch"] == "BEARISH_CHOCH" and m5["trend"] in ["TREND_DOWN", "TRANSITION_DOWN"]:
-                return {"approved": True, "reason": "SELL approved: Bearish CHoCH confirmed on M15 & M5."}
+            # توافق عام هابط (H1 هابط، و M15 لا يعارضه)
+            if h1["trend"] in ["TREND_DOWN", "TRANSITION_DOWN"] and m15["trend"] != "TREND_UP":
+                return {"approved": True, "reason": "SELL approved: Trend Continuation (H1 Bearish context)."}
 
-        # لا توجد أدلة صريحة
+        # ========================================================
+        # 2. شروط الرفض (إذا لم تتحقق الموافقة أعلاه)
+        # ========================================================
+        if is_buy and h1["trend"] == "TREND_DOWN" and m15["trend"] == "TREND_DOWN":
+            return {"approved": False, "reason": "BUY rejected: Strong H1/M15 Bearish flow. No Bullish signs on M5."}
+            
+        if is_sell and h1["trend"] == "TREND_UP" and m15["trend"] == "TREND_UP":
+            return {"approved": False, "reason": "SELL rejected: Strong H1/M15 Bullish flow. No Bearish signs on M5."}
+
         return {"approved": False, "reason": "NO_TRADE: Lack of compelling multi-timeframe structural evidence."}
 
     def evaluate_open_position(self, position_side: str, structure: Dict, quant_report: Dict) -> Dict:
-        """
-        إدارة الصفقات النشطة (Active Trade Management - Bailout).
-        تقييم ما إذا كان الانعكاس الحالي هو كسر حقيقي يستدعي قطع الخسارة مبكراً.
-        """
+        """إدارة الصفقات النشطة (Bailout)."""
         trend_h1 = structure["H1"]["trend"]
         struct_m15 = structure["M15"]["trend"]
         choch_m15 = structure["M15"]["choch"]
@@ -195,13 +164,11 @@ class MarketStructureEngine:
         position_side = str(position_side).upper()
 
         if position_side == "BUY":
-            # خروج طوارئ: H1 أصبح هابطاً، و M15 قام بكسر قاع محوري قوي (CHoCH هابط أو استمرار هبوطي)
             if trend_h1 in ["TREND_DOWN", "TRANSITION_DOWN"] and (struct_m15 == "TREND_DOWN" or choch_m15 == "BEARISH_CHOCH"):
-                return {"action": "CLOSE", "reason": "MSCE Bailout: Total Bearish Reversal. Structure broken downwards against BUY."}
+                return {"action": "CLOSE", "reason": "MSCE Bailout: Total Bearish Reversal against BUY."}
         
         elif position_side == "SELL":
-            # خروج طوارئ: H1 أصبح صاعداً، و M15 قام بكسر قمة محورية قوية (CHoCH صاعد أو استمرار صعودي)
             if trend_h1 in ["TREND_UP", "TRANSITION_UP"] and (struct_m15 == "TREND_UP" or choch_m15 == "BULLISH_CHOCH"):
-                return {"action": "CLOSE", "reason": "MSCE Bailout: Total Bullish Reversal. Structure broken upwards against SELL."}
+                return {"action": "CLOSE", "reason": "MSCE Bailout: Total Bullish Reversal against SELL."}
 
         return {"action": "HOLD", "reason": "Structure supports current position."}
